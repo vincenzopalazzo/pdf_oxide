@@ -24,7 +24,7 @@ env_logger = "0.11"
 chrono = "0.4"  # Timestamp generation for benchmark results
 
 # Parsing
-nom = "7.1"
+nom = "8.0"
 regex = "1.10"
 lazy_static = "1.4"
 
