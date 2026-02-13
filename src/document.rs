@@ -2993,7 +2993,7 @@ impl PdfDocument {
             Err(e) => {
                 extractor.pop_xobject();
                 return Err(e);
-            }
+            },
         };
         let xobject_dict = match xobject.as_dict() {
             Some(dict) => dict,
@@ -3003,7 +3003,7 @@ impl PdfDocument {
                     offset: 0,
                     reason: "XObject is not a dictionary".to_string(),
                 });
-            }
+            },
         };
 
         // Check type - only process Form XObjects, skip Images
@@ -3022,7 +3022,7 @@ impl PdfDocument {
             None => {
                 extractor.pop_xobject();
                 return Ok(());
-            }
+            },
         }
 
         // Get and decode the stream
@@ -4406,11 +4406,7 @@ pub fn parse_header<R: Read + Seek>(reader: &mut R, lenient: bool) -> Result<(u8
     // Read up to 1024 bytes
     let mut buffer = vec![0u8; 1024];
     let bytes_read = match reader.read(&mut buffer) {
-        Ok(0) => {
-            return Err(Error::InvalidHeader(
-                "File is empty (0 bytes read)".to_string(),
-            ))
-        },
+        Ok(0) => return Err(Error::InvalidHeader("File is empty (0 bytes read)".to_string())),
         Ok(n) => n,
         Err(e) => {
             return Err(Error::InvalidHeader(format!(
