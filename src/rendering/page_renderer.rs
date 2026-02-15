@@ -183,6 +183,7 @@ impl PageRenderer {
         let mut gs_stack = GraphicsStateStack::new();
         let mut current_path = PathBuilder::new();
         let mut in_text_object = false;
+        let mut clip_mask: Option<tiny_skia::Mask> = None;
 
         for op in operators {
             match op {
@@ -303,8 +304,13 @@ impl PageRenderer {
                     if let Some(path) = current_path.finish() {
                         let gs = gs_stack.current();
                         let transform = combine_transforms(base_transform, &gs.ctm);
-                        self.path_rasterizer
-                            .stroke_path(pixmap, &path, transform, gs);
+                        self.path_rasterizer.stroke_path_clipped(
+                            pixmap,
+                            &path,
+                            transform,
+                            gs,
+                            clip_mask.as_ref(),
+                        );
                     }
                     current_path = PathBuilder::new();
                 },
@@ -312,16 +318,22 @@ impl PageRenderer {
                     if let Some(path) = current_path.finish() {
                         let gs = gs_stack.current();
                         let transform = combine_transforms(base_transform, &gs.ctm);
-                        self.path_rasterizer.fill_path(
+                        self.path_rasterizer.fill_path_clipped(
                             pixmap,
                             &path,
                             transform,
                             gs,
                             FillRule::Winding,
+                            clip_mask.as_ref(),
                         );
                         if matches!(op, Operator::CloseFillStroke) {
-                            self.path_rasterizer
-                                .stroke_path(pixmap, &path, transform, gs);
+                            self.path_rasterizer.stroke_path_clipped(
+                                pixmap,
+                                &path,
+                                transform,
+                                gs,
+                                clip_mask.as_ref(),
+                            );
                         }
                     }
                     current_path = PathBuilder::new();
@@ -330,12 +342,13 @@ impl PageRenderer {
                     if let Some(path) = current_path.finish() {
                         let gs = gs_stack.current();
                         let transform = combine_transforms(base_transform, &gs.ctm);
-                        self.path_rasterizer.fill_path(
+                        self.path_rasterizer.fill_path_clipped(
                             pixmap,
                             &path,
                             transform,
                             gs,
                             FillRule::EvenOdd,
+                            clip_mask.as_ref(),
                         );
                     }
                     current_path = PathBuilder::new();
@@ -343,8 +356,41 @@ impl PageRenderer {
                 Operator::EndPath => {
                     current_path = PathBuilder::new();
                 },
-                Operator::ClipNonZero | Operator::ClipEvenOdd => {
-                    // TODO: Implement clipping
+                Operator::ClipNonZero => {
+                    // W operator: set clipping path using nonzero winding rule
+                    // Per PDF spec §8.5.4, the clip is intersected with the
+                    // current clipping region. The path is consumed by the
+                    // next path-painting operator (or n for no-paint).
+                    if let Some(path) = current_path.clone().finish() {
+                        let gs = gs_stack.current();
+                        let transform = combine_transforms(base_transform, &gs.ctm);
+                        let mut mask =
+                            tiny_skia::Mask::new(pixmap.width(), pixmap.height()).unwrap();
+                        mask.fill_path(
+                            &path,
+                            FillRule::Winding,
+                            false,
+                            transform,
+                        );
+                        clip_mask = Some(mask);
+                    }
+                    current_path = PathBuilder::new();
+                },
+                Operator::ClipEvenOdd => {
+                    // W* operator: set clipping path using even-odd rule
+                    if let Some(path) = current_path.clone().finish() {
+                        let gs = gs_stack.current();
+                        let transform = combine_transforms(base_transform, &gs.ctm);
+                        let mut mask =
+                            tiny_skia::Mask::new(pixmap.width(), pixmap.height()).unwrap();
+                        mask.fill_path(
+                            &path,
+                            FillRule::EvenOdd,
+                            false,
+                            transform,
+                        );
+                        clip_mask = Some(mask);
+                    }
                     current_path = PathBuilder::new();
                 },
 
@@ -429,8 +475,28 @@ impl PageRenderer {
                         let transform = combine_transforms(base_transform, &gs.ctm);
                         self.text_rasterizer
                             .render_text(pixmap, text, transform, gs, resources, doc)?;
-                        // Advance text position
-                        // TODO: Calculate proper advance width based on font metrics
+
+                        // Advance text position per PDF spec §9.4.4:
+                        // tx = ((w0 - Tj/1000) × Tfs + Tc + Tw) × Th
+                        // Using w0=600 (default glyph width) for each character
+                        let gs_mut = gs_stack.current_mut();
+                        let font_size = gs_mut.font_size;
+                        let h_scale = gs_mut.horizontal_scaling / 100.0;
+                        let char_space = gs_mut.char_space;
+                        let word_space = gs_mut.word_space;
+                        let w0: f32 = 600.0; // Default glyph width in 1/1000 units
+
+                        let mut total_tx: f32 = 0.0;
+                        for &byte in text.iter() {
+                            let tx = (w0 / 1000.0 * font_size + char_space) * h_scale;
+                            total_tx += tx;
+                            // Add word spacing for space characters (byte 32)
+                            if byte == 32 {
+                                total_tx += word_space * h_scale;
+                            }
+                        }
+                        let advance = Matrix::translation(total_tx, 0.0);
+                        gs_mut.text_matrix = gs_mut.text_matrix.multiply(&advance);
                     }
                 },
                 Operator::TJ { array } => {
@@ -502,7 +568,15 @@ impl PageRenderer {
                                     self.render_image(pixmap, &dict, &data, transform)?;
                                 },
                                 "Form" => {
-                                    // TODO: Render form XObject (recursive content stream)
+                                    self.render_form_xobject(
+                                        pixmap,
+                                        &dict,
+                                        &data,
+                                        transform,
+                                        doc,
+                                        page_num,
+                                        resources,
+                                    )?;
                                 },
                                 _ => {},
                             }
@@ -551,6 +625,63 @@ impl PageRenderer {
             let paint = PixmapPaint::default();
             pixmap.draw_pixmap(0, 0, img_pixmap.as_ref(), &paint, transform, None);
         }
+
+        Ok(())
+    }
+
+    /// Render a Form XObject by parsing its content stream recursively.
+    ///
+    /// Per PDF spec §8.10, a Form XObject contains its own content stream,
+    /// optional /Matrix transform, and optional /Resources dictionary.
+    fn render_form_xobject(
+        &mut self,
+        pixmap: &mut Pixmap,
+        dict: &std::collections::HashMap<String, Object>,
+        data: &[u8],
+        parent_transform: Transform,
+        doc: &mut PdfDocument,
+        page_num: usize,
+        parent_resources: &Object,
+    ) -> Result<()> {
+        // Parse /Matrix from form dict (default: identity)
+        let form_matrix = if let Some(Object::Array(arr)) = dict.get("Matrix") {
+            let get_f32 = |i: usize| -> f32 {
+                match arr.get(i) {
+                    Some(Object::Real(v)) => *v as f32,
+                    Some(Object::Integer(v)) => *v as f32,
+                    _ => if i == 0 || i == 3 { 1.0 } else { 0.0 },
+                }
+            };
+            Transform::from_row(
+                get_f32(0), get_f32(1), get_f32(2),
+                get_f32(3), get_f32(4), get_f32(5),
+            )
+        } else {
+            Transform::identity()
+        };
+
+        // Combine parent transform with form matrix
+        let combined_transform = parent_transform.pre_concat(form_matrix);
+
+        // Get form's /Resources (or fall back to parent resources)
+        let form_resources = if let Some(res) = dict.get("Resources") {
+            res.clone()
+        } else {
+            parent_resources.clone()
+        };
+
+        // Parse form content stream
+        let operators = parse_content_stream(data)?;
+
+        // Execute operators with the combined transform and form resources
+        self.execute_operators(
+            pixmap,
+            combined_transform,
+            &operators,
+            doc,
+            page_num,
+            &form_resources,
+        )?;
 
         Ok(())
     }
