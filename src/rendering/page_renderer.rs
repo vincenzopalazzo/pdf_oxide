@@ -183,16 +183,27 @@ impl PageRenderer {
         let mut gs_stack = GraphicsStateStack::new();
         let mut current_path = PathBuilder::new();
         let mut in_text_object = false;
-        let mut clip_mask: Option<tiny_skia::Mask> = None;
+        // Clip mask stack: mirrors q/Q save/restore so clipping is scoped correctly.
+        // Per PDF spec §8.5.4, clipping persists until the enclosing q/Q pair restores.
+        let mut clip_stack: Vec<Option<tiny_skia::Mask>> = vec![None];
+        // Pending clip from W/W* — applied by the next path-painting operator (or n).
+        let mut pending_clip: Option<(tiny_skia::Path, FillRule)> = None;
 
         for op in operators {
             match op {
                 // Graphics state operators
                 Operator::SaveState => {
                     gs_stack.save();
+                    // Clone current clip for the new graphics state level
+                    let current_clip = clip_stack.last().cloned().flatten();
+                    clip_stack.push(current_clip);
                 },
                 Operator::RestoreState => {
                     gs_stack.restore();
+                    // Restore previous clipping region
+                    if clip_stack.len() > 1 {
+                        clip_stack.pop();
+                    }
                 },
                 Operator::Cm { a, b, c, d, e, f } => {
                     let matrix = Matrix {
@@ -301,20 +312,31 @@ impl PageRenderer {
 
                 // Path painting
                 Operator::Stroke => {
+                    apply_pending_clip(
+                        &mut pending_clip,
+                        &mut clip_stack,
+                        pixmap,
+                        base_transform,
+                        &gs_stack,
+                    );
+                    let clip = clip_stack.last().and_then(|c| c.as_ref());
                     if let Some(path) = current_path.finish() {
                         let gs = gs_stack.current();
                         let transform = combine_transforms(base_transform, &gs.ctm);
-                        self.path_rasterizer.stroke_path_clipped(
-                            pixmap,
-                            &path,
-                            transform,
-                            gs,
-                            clip_mask.as_ref(),
-                        );
+                        self.path_rasterizer
+                            .stroke_path_clipped(pixmap, &path, transform, gs, clip);
                     }
                     current_path = PathBuilder::new();
                 },
                 Operator::Fill | Operator::CloseFillStroke => {
+                    apply_pending_clip(
+                        &mut pending_clip,
+                        &mut clip_stack,
+                        pixmap,
+                        base_transform,
+                        &gs_stack,
+                    );
+                    let clip = clip_stack.last().and_then(|c| c.as_ref());
                     if let Some(path) = current_path.finish() {
                         let gs = gs_stack.current();
                         let transform = combine_transforms(base_transform, &gs.ctm);
@@ -324,21 +346,24 @@ impl PageRenderer {
                             transform,
                             gs,
                             FillRule::Winding,
-                            clip_mask.as_ref(),
+                            clip,
                         );
                         if matches!(op, Operator::CloseFillStroke) {
-                            self.path_rasterizer.stroke_path_clipped(
-                                pixmap,
-                                &path,
-                                transform,
-                                gs,
-                                clip_mask.as_ref(),
-                            );
+                            self.path_rasterizer
+                                .stroke_path_clipped(pixmap, &path, transform, gs, clip);
                         }
                     }
                     current_path = PathBuilder::new();
                 },
                 Operator::FillEvenOdd => {
+                    apply_pending_clip(
+                        &mut pending_clip,
+                        &mut clip_stack,
+                        pixmap,
+                        base_transform,
+                        &gs_stack,
+                    );
+                    let clip = clip_stack.last().and_then(|c| c.as_ref());
                     if let Some(path) = current_path.finish() {
                         let gs = gs_stack.current();
                         let transform = combine_transforms(base_transform, &gs.ctm);
@@ -348,40 +373,35 @@ impl PageRenderer {
                             transform,
                             gs,
                             FillRule::EvenOdd,
-                            clip_mask.as_ref(),
+                            clip,
                         );
                     }
                     current_path = PathBuilder::new();
                 },
                 Operator::EndPath => {
+                    // n operator: no-op painting — but still consumes a pending clip
+                    apply_pending_clip(
+                        &mut pending_clip,
+                        &mut clip_stack,
+                        pixmap,
+                        base_transform,
+                        &gs_stack,
+                    );
                     current_path = PathBuilder::new();
                 },
                 Operator::ClipNonZero => {
-                    // W operator: set clipping path using nonzero winding rule
-                    // Per PDF spec §8.5.4, the clip is intersected with the
-                    // current clipping region. The path is consumed by the
-                    // next path-painting operator (or n for no-paint).
+                    // W operator: set clipping path using nonzero winding rule.
+                    // Per PDF spec §8.5.4, W does NOT consume the path — it records
+                    // a pending clip that takes effect with the next painting operator.
                     if let Some(path) = current_path.clone().finish() {
-                        let gs = gs_stack.current();
-                        let transform = combine_transforms(base_transform, &gs.ctm);
-                        let mut mask =
-                            tiny_skia::Mask::new(pixmap.width(), pixmap.height()).unwrap();
-                        mask.fill_path(&path, FillRule::Winding, false, transform);
-                        clip_mask = Some(mask);
+                        pending_clip = Some((path, FillRule::Winding));
                     }
-                    current_path = PathBuilder::new();
                 },
                 Operator::ClipEvenOdd => {
-                    // W* operator: set clipping path using even-odd rule
+                    // W* operator: set clipping path using even-odd rule.
                     if let Some(path) = current_path.clone().finish() {
-                        let gs = gs_stack.current();
-                        let transform = combine_transforms(base_transform, &gs.ctm);
-                        let mut mask =
-                            tiny_skia::Mask::new(pixmap.width(), pixmap.height()).unwrap();
-                        mask.fill_path(&path, FillRule::EvenOdd, false, transform);
-                        clip_mask = Some(mask);
+                        pending_clip = Some((path, FillRule::EvenOdd));
                     }
-                    current_path = PathBuilder::new();
                 },
 
                 // Text operators
@@ -461,10 +481,11 @@ impl PageRenderer {
                 // Text showing
                 Operator::Tj { text } | Operator::Quote { text } => {
                     if in_text_object {
+                        let clip = clip_stack.last().and_then(|c| c.as_ref());
                         let gs = gs_stack.current();
                         let transform = combine_transforms(base_transform, &gs.ctm);
                         self.text_rasterizer
-                            .render_text(pixmap, text, transform, gs, resources, doc)?;
+                            .render_text(pixmap, text, transform, gs, resources, doc, clip)?;
 
                         // Advance text position per PDF spec §9.4.4:
                         // tx = ((w0 - Tj/1000) × Tfs + Tc + Tw) × Th
@@ -491,10 +512,11 @@ impl PageRenderer {
                 },
                 Operator::TJ { array } => {
                     if in_text_object {
+                        let clip = clip_stack.last().and_then(|c| c.as_ref());
                         let gs = gs_stack.current();
                         let transform = combine_transforms(base_transform, &gs.ctm);
                         self.text_rasterizer
-                            .render_tj_array(pixmap, array, transform, gs, resources, doc)?;
+                            .render_tj_array(pixmap, array, transform, gs, resources, doc, clip)?;
                     }
                 },
                 Operator::DoubleQuote {
@@ -503,20 +525,24 @@ impl PageRenderer {
                     text,
                 } => {
                     if in_text_object {
+                        let clip = clip_stack.last().and_then(|c| c.as_ref());
                         gs_stack.current_mut().word_space = *word_space;
                         gs_stack.current_mut().char_space = *char_space;
                         let gs = gs_stack.current();
                         let transform = combine_transforms(base_transform, &gs.ctm);
                         self.text_rasterizer
-                            .render_text(pixmap, text, transform, gs, resources, doc)?;
+                            .render_text(pixmap, text, transform, gs, resources, doc, clip)?;
                     }
                 },
 
                 // XObject (images)
                 Operator::Do { name } => {
+                    let clip = clip_stack.last().and_then(|c| c.as_ref());
                     let gs = gs_stack.current();
                     let transform = combine_transforms(base_transform, &gs.ctm);
-                    self.render_xobject(pixmap, name, transform, gs, resources, doc, page_num)?;
+                    self.render_xobject(
+                        pixmap, name, transform, gs, resources, doc, page_num, clip,
+                    )?;
                 },
 
                 // Extended graphics state
@@ -542,6 +568,7 @@ impl PageRenderer {
         resources: &Object,
         doc: &mut PdfDocument,
         _page_num: usize,
+        clip_mask: Option<&tiny_skia::Mask>,
     ) -> Result<()> {
         // Get XObject from resources
         if let Object::Dictionary(res_dict) = resources {
@@ -555,7 +582,7 @@ impl PageRenderer {
                         if let Some(Object::Name(subtype)) = dict.get("Subtype") {
                             match subtype.as_str() {
                                 "Image" => {
-                                    self.render_image(pixmap, &dict, &data, transform)?;
+                                    self.render_image(pixmap, &dict, &data, transform, clip_mask)?;
                                 },
                                 "Form" => {
                                     self.render_form_xobject(
@@ -579,6 +606,7 @@ impl PageRenderer {
         dict: &std::collections::HashMap<String, Object>,
         data: &[u8],
         transform: Transform,
+        clip_mask: Option<&tiny_skia::Mask>,
     ) -> Result<()> {
         // Get image dimensions
         let width = dict
@@ -605,9 +633,9 @@ impl PageRenderer {
         if let Some(img_pixmap) =
             Pixmap::from_vec(rgba_data, tiny_skia::IntSize::from_wh(width, height).unwrap())
         {
-            // Draw image with transform
+            // Draw image with transform and clip mask
             let paint = PixmapPaint::default();
-            pixmap.draw_pixmap(0, 0, img_pixmap.as_ref(), &paint, transform, None);
+            pixmap.draw_pixmap(0, 0, img_pixmap.as_ref(), &paint, transform, clip_mask);
         }
 
         Ok(())
@@ -826,6 +854,40 @@ fn cmyk_to_rgb(c: f32, m: f32, y: f32, k: f32) -> (f32, f32, f32) {
     let g = (1.0 - m) * (1.0 - k);
     let b = (1.0 - y) * (1.0 - k);
     (r, g, b)
+}
+
+/// Apply a pending clip path (from W/W*) to the clip stack.
+///
+/// Per PDF spec §8.5.4, the clipping path is set by W/W* but takes effect
+/// when the next path-painting operator (or n) executes. The new clip is
+/// intersected with the current clip region.
+fn apply_pending_clip(
+    pending_clip: &mut Option<(tiny_skia::Path, FillRule)>,
+    clip_stack: &mut Vec<Option<tiny_skia::Mask>>,
+    pixmap: &Pixmap,
+    base_transform: Transform,
+    gs_stack: &GraphicsStateStack,
+) {
+    if let Some((clip_path, fill_rule)) = pending_clip.take() {
+        let gs = gs_stack.current();
+        let transform = combine_transforms(base_transform, &gs.ctm);
+        let mut new_mask = tiny_skia::Mask::new(pixmap.width(), pixmap.height()).unwrap();
+        new_mask.fill_path(&clip_path, fill_rule, false, transform);
+
+        // Intersect with existing clip: AND the masks together
+        if let Some(Some(existing)) = clip_stack.last() {
+            let existing_data = existing.data();
+            let new_data = new_mask.data_mut();
+            for (n, e) in new_data.iter_mut().zip(existing_data.iter()) {
+                // Both masks are alpha [0..255]; multiply to intersect
+                *n = ((*n as u16 * *e as u16) / 255) as u8;
+            }
+        }
+
+        if let Some(slot) = clip_stack.last_mut() {
+            *slot = Some(new_mask);
+        }
+    }
 }
 
 /// Combine base transform with PDF matrix.
