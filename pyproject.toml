@@ -4,20 +4,22 @@ build-backend = "maturin"
 
 [project]
 name = "pdf_oxide"
-version = "0.3.5"
-description = "The Complete PDF Toolkit: extract, create, and edit PDFs with one library. Rust core with Python bindings."
+version = "0.3.6"
+description = "Fast Python PDF library for text extraction, markdown conversion, and document processing. Rust-powered, 2.1ms mean latency."
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT OR Apache-2.0"}
 authors = [
-    {name = "PDF Oxide Contributors", email = "yf@yfedoseev.com"},
+    {name = "PDF Oxide Contributors", email = "yfedoseev@gmail.com"},
 ]
-keywords = ["pdf", "text-extraction", "ocr", "rag", "llm", "markdown", "document-parser"]
+keywords = ["pdf", "text-extraction", "pdf-parser", "pdf-library", "rag", "llm", "markdown", "document-parser", "pdf-to-text", "pdf-extraction", "fast-pdf", "data-extraction"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
@@ -25,15 +27,20 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: Rust",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing",
+    "Topic :: Text Processing :: General",
     "Topic :: Text Processing :: Markup :: HTML",
     "Topic :: Text Processing :: Markup :: Markdown",
+    "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 
 [project.urls]
 Homepage = "https://github.com/yfedoseev/pdf_oxide"
-Documentation = "https://docs.rs/pdf_oxide"
+Documentation = "https://github.com/yfedoseev/pdf_oxide/blob/main/docs/getting-started-python.md"
+"API Reference (Rust)" = "https://docs.rs/pdf_oxide"
 Repository = "https://github.com/yfedoseev/pdf_oxide"
 "Bug Tracker" = "https://github.com/yfedoseev/pdf_oxide/issues"
 

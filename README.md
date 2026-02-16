@@ -1,11 +1,10 @@
-# PDFOxide
+# PDF Oxide — Fast Python & Rust PDF Library
 
-**Fast PDF Toolkit for Rust and Python**
-
-Extract, create, and edit PDFs with Rust performance. Native Python bindings included.
+The fastest Python PDF library for text extraction, image extraction, and markdown conversion. Built on a Rust core for reliability and speed — mean 2.1ms per page, 99.8% pass rate on 3,830 real-world PDFs.
 
 [![Crates.io](https://img.shields.io/crates/v/pdf_oxide.svg)](https://crates.io/crates/pdf_oxide)
 [![PyPI](https://img.shields.io/pypi/v/pdf_oxide.svg)](https://pypi.org/project/pdf_oxide/)
+[![PyPI Downloads](https://img.shields.io/pypi/dm/pdf-oxide)](https://pypi.org/project/pdf-oxide/)
 [![Documentation](https://docs.rs/pdf_oxide/badge.svg)](https://docs.rs/pdf_oxide)
 [![Build Status](https://github.com/yfedoseev/pdf_oxide/workflows/CI/badge.svg)](https://github.com/yfedoseev/pdf_oxide/actions)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](https://opensource.org/licenses)
@@ -43,10 +42,11 @@ pdf_oxide = "0.3"
 
 ## Why pdf_oxide?
 
-- **Fast** — Rust core, p50 = 0.6ms per PDF, 97.6% under 10ms
-- **Reliable** — 100% pass rate on 3,830 test PDFs, zero panics
-- **Complete** — Extract, create, and edit with one library
+- **Fast** — Rust core, mean 2.1ms per PDF page, p99 = 18ms, 98.4% under 10ms
+- **Reliable** — 100% pass rate on 3,830 test PDFs, zero panics, zero slow (>5s) PDFs
+- **Complete** — Text extraction, image extraction, PDF creation, and editing in one library
 - **Dual-language** — First-class Rust API and Python bindings via PyO3
+- **Permissive license** — MIT / Apache-2.0 — use freely in commercial and open-source projects
 
 ## Features
 
@@ -114,20 +114,23 @@ Verified against 3,830 PDFs from three independent test suites:
 | Corpus | PDFs | Pass Rate |
 |--------|-----:|----------:|
 | veraPDF (PDF/A compliance) | 2,907 | 100% |
-| Mozilla pdf.js | 897 | 100% |
+| Mozilla pdf.js | 897 | 99.2% |
 | SafeDocs (targeted edge cases) | 26 | 100% |
-| **Total** | **3,830** | **100%** |
+| **Total** | **3,830** | **99.8%** |
 
-| Metric | Result |
-|--------|--------|
-| **p50 latency** | 0.6ms |
-| **p90 latency** | 3.0ms |
-| **p99 latency** | 33ms |
-| **Under 10ms** | 97.6% of PDFs |
-| **Timeouts** | 0 |
-| **Panics** | 0 |
+| Metric | v0.3.5 | v0.3.6 |
+|--------|--------|--------|
+| **Mean latency** | 23.3ms | **2.1ms** (-91%) |
+| **p50 latency** | 0.6ms | 0.6ms |
+| **p90 latency** | 3.0ms | **2.6ms** (-13%) |
+| **p99 latency** | 33ms | **18ms** (-46%) |
+| **Max latency** | 68,722ms | **625ms** (-99%) |
+| **Under 10ms** | 97.4% | **98.4%** |
+| **Slow (>5s)** | 2 | **0** |
+| **Timeouts** | 0 | 0 |
+| **Panics** | 0 | 0 |
 
-100% pass rate on all valid PDFs. The only 7 non-passing files across the entire corpus are intentionally broken test fixtures (no PDF header, fuzz-corrupted catalogs, invalid xref streams).
+v0.3.6 eliminated two O(n) bottlenecks: page tree traversal (168× faster on 10,000-page PDFs) and xref miss scanning (146× faster on tagged PDFs). 100% pass rate on all valid PDFs — the 7 non-passing files across the corpus are intentionally broken test fixtures (missing PDF header, fuzz-corrupted catalogs, invalid xref streams).
 
 ## Installation
 
@@ -168,6 +171,18 @@ maturin develop
 - **[API Docs](https://docs.rs/pdf_oxide)** - Full Rust API reference
 - **[PDF Spec Reference](docs/spec/pdf.md)** - ISO 32000-1:2008
 
+## Use Cases
+
+- **RAG / LLM pipelines** — Convert PDFs to clean Markdown for retrieval-augmented generation with LangChain, LlamaIndex, or any framework
+- **Document processing at scale** — Extract text, images, and metadata from thousands of PDFs in seconds
+- **Data extraction** — Pull structured data from forms, tables, and layouts
+- **Academic research** — Parse papers, extract citations, and process large corpora
+- **PDF generation** — Create invoices, reports, certificates, and templated documents programmatically
+
+## License
+
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option. Unlike AGPL-licensed alternatives, pdf_oxide can be used freely in any project — commercial or open-source — with no copyleft restrictions.
+
 ## Contributing
 
 We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
@@ -175,10 +190,6 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 ```bash
 cargo build && cargo test && cargo fmt && cargo clippy -- -D warnings
 ```
-
-## License
-
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.
 
 ## Citation
 
@@ -193,4 +204,4 @@ Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your o
 
 ---
 
-**Rust** + **Python** | 100% pass rate on 3,830 PDFs | p50 = 0.6ms | v0.3.5
+**Rust** + **Python** | MIT/Apache-2.0 | 99.8% pass rate on 3,830 PDFs | mean 2.1ms | v0.3.6

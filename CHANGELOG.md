@@ -2,7 +2,47 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [0.3.6] - 2026-02-16
+> Performance: Two Critical O(n) Bottlenecks Eliminated
+
+### Performance
+
+- **Bulk page tree cache** — On first page access, the entire page tree is walked once and all pages are cached. Previously `get_page()` traversed from root for every uncached page — O(n) per page, O(n²) total for sequential access. Now O(1) per page after a single O(n) walk.
+  - **isartor-6-1-12-t01-fail-a.pdf (10,000 pages): 55,667ms → 332ms (168× faster)**
+  - Eliminates the last >5s PDF in the entire 3,830-file corpus
+
+- **Scan-for-object offset cache** (#44) — When objects are missing from the xref table, `scan_for_object()` previously read the entire PDF file for each missing object. Tagged PDFs with hundreds of structure tree elements not in xref triggered hundreds of full file reads. Now the file is scanned once and all object offsets are cached in a HashMap.
+  - **Artikeltext (10pp, 1.3MB): 9,931ms → 68ms (146× faster)**
+  - **cs231n (154pp, 571 fonts): 17,872ms → 405ms (44× faster)**
+
+- **Single-pass text extraction** — `extract_spans()` no longer runs two passes (classify document type, then extract). The classification pass was discarded entirely; adaptive font-aware thresholds now produce equal or better results in a single pass.
+
+- **Content stream Vec pre-allocation** — `parse_content_stream()` pre-allocates operator Vec capacity based on stream size (`data.len() / 20`), reducing reallocations for large content streams.
+
+### Verified — 3,830-PDF Corpus (v0.3.5 → v0.3.6)
+
+| Metric | v0.3.5 | v0.3.6 | Change |
+|--------|--------|--------|--------|
+| **Pass rate** | 99.8% | 99.8% | 3,823 of 3,830 valid PDFs |
+| **Slow (>5s)** | 2 | **0** | Eliminated |
+| **Mean** | 23.3ms | **2.1ms** | **-91%** |
+| **p50** | 0.6ms | 0.6ms | — |
+| **p90** | 3.0ms | **2.6ms** | -13% |
+| **p95** | 5.1ms | **4.7ms** | -8% |
+| **p99** | 33.2ms | **18.0ms** | **-46%** |
+| **Max** | 68,722ms | **625ms** | **-99%** |
+| **Sum (all PDFs)** | 89.1s | **8.0s** | **-91%** |
+
+The 7 non-passing files are intentionally broken test fixtures (missing PDF header, fuzz-corrupted catalogs, invalid xref streams).
+
+Text output verified byte-identical on 11 PDFs (862KB of extracted text). 4 PDFs show improved extraction quality from adaptive spacing (more complete words recovered).
+
+### 🏆 Community Contributors
+
+🥇 **@SeanPedersen** — Continued thanks to Sean whose Issue #44 performance report directly drove the investigation that uncovered both O(n) bottlenecks. His real-world test PDFs (German academic papers, Stanford lecture slides) were instrumental in profiling and validating the fixes. 🙏📊
+
 ## [0.3.5] - 2026-02-15
+> Performance, 3,830-PDF Stability & Error Recovery
 
 ### Performance
 
@@ -125,6 +165,7 @@ All notable changes to PDFOxide are documented here.
 🥇 **@SeanPedersen** — Huge thanks to Sean for reporting multiple issues (#41, #44, #45, #46) that drove the entire stability focus of this release. His real-world testing uncovered a parser bug with Google-generated PDFs, image extraction failures on content stream references, and performance problems — each report triggering deep investigation and significant fixes. The parser robustness, image extraction, and testing infrastructure improvements in v0.3.5 all trace back to Sean's thorough bug reports. 🙏🔍
 
 ## [0.3.4] - 2026-02-12
+> Parsing Robustness, Character Extraction & XObject Paths
 
 ### ⚠️ Breaking Changes
 - **`parse_header()` function signature** - Now includes offset tracking
@@ -170,6 +211,7 @@ All notable changes to PDFOxide are documented here.
 - All parse_header test cases updated to use new signature
 
 ## [0.3.1] - 2026-01-14
+> Form Fields, Multimedia & Python 3.8-3.14
 
 ### Added - Form Field Coverage (95% across Read/Create/Modify)
 
@@ -255,6 +297,7 @@ All notable changes to PDFOxide are documented here.
 🥈 **@bikallem** - Thanks for the thoughtful feature request (#27) comparing PDFOxide to pdfium-render. Your detailed analysis of missing origin coordinates and rotation angles led directly to our TextChar transformation feature. This makes PDFOxide a viable migration path for pdfium-render users. 🎯
 
 ## [0.3.0] - 2026-01-10
+> Unified API, PDF Creation & Editing
 
 ### Added - Unified `Pdf` API
 - **One API for Extract, Create, and Edit** - The new `Pdf` class unifies all PDF operations
@@ -437,6 +480,7 @@ All notable changes to PDFOxide are documented here.
 🙏 **@mert-kurttutan** - Thanks for the honest feedback in issue #15 about README clutter. Your perspective as a new user helped us realize we were overwhelming people with information. The resulting documentation cleanup makes PDFOxide more approachable. 📚
 
 ## [0.2.6] - 2026-01-09
+> CJK Support & Structure Tree Enhancements
 
 ### Added
 - **TagSuspect/MarkInfo support** (ISO 32000-1 Section 14.7.1)
@@ -472,6 +516,7 @@ All notable changes to PDFOxide are documented here.
 - `OrderedContent.mcid` changed to `Option<u32>` to support word break markers
 
 ## [0.2.5] - 2026-01-09
+> Image Embedding & Export
 
 ### Added
 - **Image embedding**: Both HTML and Markdown now support embedded base64 images when `embed_images=true` (default)
@@ -484,6 +529,7 @@ All notable changes to PDFOxide are documented here.
 - Python bindings: new `embed_images` parameter for `to_html`, `to_markdown`, and `*_all` methods
 
 ## [0.2.4] - 2026-01-09
+> CTM Fix & Formula Rendering
 
 ### Fixed
 - CTM (Current Transformation Matrix) now correctly applied to text positions per PDF Spec ISO 32000-1:2008 Section 9.4.4 (#11)
@@ -500,6 +546,7 @@ All notable changes to PDFOxide are documented here.
 🐛➡️✅ **@mert-kurttutan** - Thanks for the detailed bug report (#11) with reproducible sample PDF! Your report exposed a fundamental CTM transformation bug affecting text positioning across the entire library. This fix was critical for production use. 🎉
 
 ## [0.2.3] - 2026-01-07
+> BT/ET Matrix Reset & Text Processing
 
 ### Fixed
 - BT/ET matrix reset per PDF spec Section 9.4.1 (PR #10 by @drahnr)
@@ -522,11 +569,13 @@ All notable changes to PDFOxide are documented here.
 🎯 **@Borderliner** - Thanks for two important catches! Issue #6 revealed that `apply_intelligent_text_processing()` was documented but not actually available (oops! 😅), and #7 caught our overly verbose INFO-level logging flooding terminals. Both fixed immediately! 🔧
 
 ## [0.2.2] - 2025-12-15
+> Discoverability Improvements
 
 ### Changed
 - Optimized crate keywords for better discoverability
 
 ## [0.2.1] - 2025-12-15
+> Encrypted PDF Fixes
 
 ### Fixed
 - Encrypted stream decoding improvements (#3)

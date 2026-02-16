@@ -1,6 +1,6 @@
 [package]
 name = "pdf_oxide"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2021"
 authors = ["Yury Fedoseev <yfedoseev@gmail.com>"]
 license = "MIT OR Apache-2.0"
@@ -9,8 +9,8 @@ repository = "https://github.com/yfedoseev/pdf_oxide"
 homepage = "https://github.com/yfedoseev/pdf_oxide"
 documentation = "https://docs.rs/pdf_oxide"
 readme = "README.md"
-keywords = ["pdf", "text-extraction", "pdf-creation", "pdf-editing", "parser"]
-categories = ["parsing", "text-processing"]
+keywords = ["pdf", "text-extraction", "pdf-parser", "markdown", "document"]
+categories = ["parsing", "text-processing", "multimedia::images"]
 
 [lib]
 name = "pdf_oxide"
