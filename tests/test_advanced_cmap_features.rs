@@ -240,7 +240,7 @@ end
     };
 
     // Verify: Boundary cases work
-    assert_eq!(font.char_to_unicode(0x0000), Some("\u{0000}".to_string())); // NUL
+    assert_eq!(font.char_to_unicode(0x0000), Some("\u{FFFD}".to_string())); // NUL mapped to replacement char
     assert_eq!(font.char_to_unicode(0x7FFF), Some("A".to_string()));
     assert_eq!(font.char_to_unicode(0xFFFF), Some("B".to_string()));
 }

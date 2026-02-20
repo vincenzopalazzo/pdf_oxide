@@ -76,7 +76,7 @@ fn walk_dir(dir: &Path, corpus_name: &str, results: &mut Vec<(PathBuf, String)>)
         if path.is_dir() {
             walk_dir(&path, corpus_name, results);
         } else if let Some(ext) = path.extension() {
-            if ext.to_ascii_lowercase() == "pdf" {
+            if ext.eq_ignore_ascii_case("pdf") {
                 results.push((path, corpus_name.to_string()));
             }
         }
@@ -132,14 +132,11 @@ fn main() {
 
     let mut i = 1;
     while i < args.len() {
-        match args[i].as_str() {
-            "--output" => {
-                i += 1;
-                if i < args.len() {
-                    output_dir = PathBuf::from(&args[i]);
-                }
-            },
-            _ => {},
+        if args[i] == "--output" {
+            i += 1;
+            if i < args.len() {
+                output_dir = PathBuf::from(&args[i]);
+            }
         }
         i += 1;
     }
