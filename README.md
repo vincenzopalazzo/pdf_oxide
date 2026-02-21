@@ -118,19 +118,19 @@ Verified against 3,830 PDFs from three independent test suites:
 | SafeDocs (targeted edge cases) | 26 | 100% |
 | **Total** | **3,830** | **100%** |
 
-| Metric | v0.3.5 | v0.3.6 |
-|--------|--------|--------|
-| **Mean latency** | 23.3ms | **2.1ms** (-91%) |
-| **p50 latency** | 0.6ms | 0.6ms |
-| **p90 latency** | 3.0ms | **2.6ms** (-13%) |
-| **p99 latency** | 33ms | **18ms** (-46%) |
-| **Max latency** | 68,722ms | **625ms** (-99%) |
-| **Under 10ms** | 97.4% | **98.4%** |
-| **Slow (>5s)** | 2 | **0** |
-| **Timeouts** | 0 | 0 |
-| **Panics** | 0 | 0 |
+| Metric | Value |
+|--------|-------|
+| **Mean latency** | **2.1ms** |
+| **p50 latency** | 0.6ms |
+| **p90 latency** | 2.6ms |
+| **p99 latency** | 18ms |
+| **Max latency** | 625ms |
+| **Under 10ms** | 98.4% |
+| **Slow (>5s)** | 0 |
+| **Timeouts** | 0 |
+| **Panics** | 0 |
 
-v0.3.6 eliminated two O(n) bottlenecks: page tree traversal (168× faster on 10,000-page PDFs) and xref miss scanning (146× faster on tagged PDFs). 100% pass rate on all valid PDFs — the 7 non-passing files across the corpus are intentionally broken test fixtures (missing PDF header, fuzz-corrupted catalogs, invalid xref streams).
+100% pass rate on all valid PDFs — the 7 non-passing files across the corpus are intentionally broken test fixtures (missing PDF header, fuzz-corrupted catalogs, invalid xref streams). v0.3.8 adds a text-only content stream parser that skips graphics operators at the byte level, further reducing parse time on graphics-heavy pages.
 
 ## Installation
 
@@ -204,4 +204,4 @@ cargo build && cargo test && cargo fmt && cargo clippy -- -D warnings
 
 ---
 
-**Rust** + **Python** | MIT/Apache-2.0 | 100% pass rate on 3,830 PDFs | mean 2.1ms/doc | v0.3.6
+**Rust** + **Python** | MIT/Apache-2.0 | 100% pass rate on 3,830 PDFs | mean 2.1ms/doc | v0.3.8
