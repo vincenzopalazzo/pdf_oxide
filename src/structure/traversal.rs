@@ -64,6 +64,131 @@ pub fn traverse_structure_tree(
     Ok(result)
 }
 
+/// Traverse the structure tree once and build content for ALL pages.
+///
+/// This is much more efficient than calling `traverse_structure_tree` once per page,
+/// which would walk the entire tree N times. Instead, we walk the tree once and
+/// collect content items into per-page buckets.
+///
+/// Returns a HashMap mapping page numbers to their ordered content items.
+pub fn traverse_structure_tree_all_pages(
+    struct_tree: &StructTreeRoot,
+) -> std::collections::HashMap<u32, Vec<OrderedContent>> {
+    let mut result: std::collections::HashMap<u32, Vec<OrderedContent>> =
+        std::collections::HashMap::new();
+
+    for root_elem in &struct_tree.root_elements {
+        traverse_element_all_pages(root_elem, &mut result);
+    }
+
+    result
+}
+
+/// Recursively traverse a structure element, collecting content for all pages.
+fn traverse_element_all_pages(
+    elem: &StructElem,
+    result: &mut std::collections::HashMap<u32, Vec<OrderedContent>>,
+) {
+    let struct_type_str = format!("{:?}", elem.struct_type);
+    let parsed_type = elem.struct_type.clone();
+    let is_heading = elem.struct_type.is_heading();
+    let is_block = elem.struct_type.is_block();
+    let is_word_break = elem.struct_type.is_word_break();
+
+    // If /ActualText is present, it replaces all descendant content (PDF spec 14.9.4)
+    if let Some(ref actual_text) = elem.actual_text {
+        // Collect all pages this element has content on
+        let pages = collect_pages(elem);
+        for page in pages {
+            result.entry(page).or_default().push(OrderedContent {
+                page,
+                mcid: None,
+                struct_type: struct_type_str.clone(),
+                parsed_type: parsed_type.clone(),
+                is_heading,
+                is_block,
+                is_word_break: false,
+                actual_text: Some(actual_text.clone()),
+            });
+        }
+        return;
+    }
+
+    // If this is a WB (word break) element, emit a word break marker for all relevant pages
+    if is_word_break {
+        // WB elements don't have a specific page, emit for parent's page context
+        // Since we don't know the page here, we handle it in the child loop
+    }
+
+    // Process children in order
+    for child in &elem.children {
+        match child {
+            StructChild::MarkedContentRef { mcid, page } => {
+                result.entry(*page).or_default().push(OrderedContent {
+                    page: *page,
+                    mcid: Some(*mcid),
+                    struct_type: struct_type_str.clone(),
+                    parsed_type: parsed_type.clone(),
+                    is_heading,
+                    is_block,
+                    is_word_break: false,
+                    actual_text: None,
+                });
+            },
+
+            StructChild::StructElem(child_elem) => {
+                // If parent is WB, emit word break markers before processing child
+                if is_word_break {
+                    let child_pages = collect_pages(child_elem);
+                    for page in child_pages {
+                        result.entry(page).or_default().push(OrderedContent {
+                            page,
+                            mcid: None,
+                            struct_type: struct_type_str.clone(),
+                            parsed_type: parsed_type.clone(),
+                            is_heading: false,
+                            is_block: false,
+                            is_word_break: true,
+                            actual_text: None,
+                        });
+                    }
+                }
+                traverse_element_all_pages(child_elem, result);
+            },
+
+            StructChild::ObjectRef(_obj_num, _gen) => {
+                log::debug!("Skipping unresolved ObjectRef({}, {})", _obj_num, _gen);
+            },
+        }
+    }
+}
+
+/// Collect all page numbers that a structure element has content on.
+fn collect_pages(elem: &StructElem) -> Vec<u32> {
+    let mut pages = Vec::new();
+    collect_pages_recursive(elem, &mut pages);
+    pages.sort_unstable();
+    pages.dedup();
+    pages
+}
+
+fn collect_pages_recursive(elem: &StructElem, pages: &mut Vec<u32>) {
+    if let Some(page) = elem.page {
+        pages.push(page);
+    }
+    for child in &elem.children {
+        match child {
+            StructChild::MarkedContentRef { page, .. } => {
+                pages.push(*page);
+            },
+            StructChild::StructElem(child_elem) => {
+                collect_pages_recursive(child_elem, pages);
+            },
+            _ => {},
+        }
+    }
+}
+
 /// Recursively traverse a structure element.
 ///
 /// Performs pre-order traversal:

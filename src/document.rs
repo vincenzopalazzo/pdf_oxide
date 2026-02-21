@@ -18,6 +18,7 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Arc;
 
 /// Maximum recursion depth for object resolution
 const MAX_RECURSION_DEPTH: u32 = 100;
@@ -76,8 +77,12 @@ pub struct PdfDocument {
     header_offset: u64,
     /// Font cache keyed by indirect ObjectRef to avoid re-parsing fonts across pages
     font_cache: HashMap<ObjectRef, crate::fonts::FontInfo>,
-    /// Cached structure tree (None = not yet checked, Some(None) = untagged, Some(Some) = tagged)
-    structure_tree_cache: Option<Option<crate::structure::StructTreeRoot>>,
+    /// Cached structure tree (None = not yet checked, Some(None) = untagged, Some(Some) = tagged).
+    /// Uses Arc to avoid expensive deep clones on every page extraction.
+    structure_tree_cache: Option<Option<Arc<crate::structure::StructTreeRoot>>>,
+    /// Cached per-page structure tree traversal results.
+    /// Built once from the structure tree, then O(1) lookup per page.
+    structure_content_cache: Option<HashMap<u32, Vec<crate::structure::OrderedContent>>>,
     /// Page object cache keyed by page index to avoid re-traversing the page tree.
     /// The page tree structure is static (§7.7.3.2), so pages can be safely cached.
     page_cache: HashMap<usize, Object>,
@@ -191,6 +196,7 @@ impl PdfDocument {
             header_offset,
             font_cache: HashMap::new(),
             structure_tree_cache: None,
+            structure_content_cache: None,
             page_cache: HashMap::new(),
             page_cache_populated: false,
             scanned_object_offsets: None,
@@ -2358,18 +2364,25 @@ impl PdfDocument {
         // For Tagged PDFs, use structure tree for reading order (spec-compliant)
         // For Untagged PDFs, use page content order (spec-compliant)
 
-        // Check if this is a Tagged PDF with structure tree (cached after first check)
+        // Check if this is a Tagged PDF with structure tree (cached after first check).
+        // Uses Arc to avoid expensive deep clones of the tree on every page.
         let cached_tree = match &self.structure_tree_cache {
-            Some(cached) => cached.clone(),
+            Some(cached) => cached.clone(), // Arc clone = cheap ref count bump
             None => {
-                let tree = self.structure_tree().ok().flatten();
+                let tree = self.structure_tree().ok().flatten().map(Arc::new);
                 self.structure_tree_cache = Some(tree.clone());
                 tree
             },
         };
 
         if let Some(struct_tree) = cached_tree {
-            return self.extract_text_structure_order(page_index, &struct_tree);
+            // Build per-page traversal cache once, then O(1) lookup per page.
+            // This avoids re-traversing the entire structure tree for each page.
+            if self.structure_content_cache.is_none() {
+                let all_content = crate::structure::traverse_structure_tree_all_pages(&struct_tree);
+                self.structure_content_cache = Some(all_content);
+            }
+            return self.extract_text_structure_order_cached(page_index);
         }
 
         // Untagged PDF: Use page content order (current implementation)
@@ -3031,6 +3044,7 @@ impl PdfDocument {
     /// // This is called automatically by extract_text() for Tagged PDFs
     /// let text = doc.extract_text(0)?;
     /// ```
+    #[allow(dead_code)]
     fn extract_text_structure_order(
         &mut self,
         page_index: usize,
@@ -3195,6 +3209,179 @@ impl PdfDocument {
                     }
                 }
                 // Expand ligature characters
+                for ch in span.text.chars() {
+                    if let Some(components) =
+                        crate::text::ligature_processor::get_ligature_components(ch)
+                    {
+                        text.push_str(components);
+                    } else {
+                        text.push(ch);
+                    }
+                }
+                prev_span = Some(span);
+            }
+        }
+
+        // Append text from form fields and annotations
+        self.append_annotation_text(page_index, &mut text);
+
+        Ok(text)
+    }
+
+    /// Extract text from a Tagged PDF page using pre-computed structure traversal cache.
+    ///
+    /// This is the optimized version of `extract_text_structure_order` that uses
+    /// the pre-built `structure_content_cache` for O(1) page content lookup instead
+    /// of re-traversing the entire structure tree for each page.
+    fn extract_text_structure_order_cached(
+        &mut self,
+        page_index: usize,
+    ) -> Result<String> {
+        log::debug!("Extracting text using cached structure order for page {}", page_index);
+
+        // Step 1: Extract all spans with MCIDs
+        let all_spans = self.extract_spans(page_index)?;
+
+        if all_spans.is_empty() {
+            let mut text = String::new();
+            self.append_annotation_text(page_index, &mut text);
+            return Ok(text);
+        }
+
+        // Step 2: Build MCID → Vec<TextSpan> map
+        let mut mcid_map: HashMap<u32, Vec<TextSpan>> = HashMap::new();
+        let mut spans_without_mcid: Vec<TextSpan> = Vec::new();
+
+        for span in all_spans {
+            if let Some(mcid) = span.mcid {
+                mcid_map.entry(mcid).or_default().push(span);
+            } else {
+                spans_without_mcid.push(span);
+            }
+        }
+
+        // Step 3: Get pre-computed ordered content for this page (O(1) lookup)
+        let ordered_content = self
+            .structure_content_cache
+            .as_ref()
+            .and_then(|cache| cache.get(&(page_index as u32)))
+            .cloned()
+            .unwrap_or_default();
+
+        log::debug!(
+            "Cached structure content: {} items for page {}, {} MCIDs with spans",
+            ordered_content.len(),
+            page_index,
+            mcid_map.len()
+        );
+
+        // Step 4: Assemble text in structure order
+        let mut text = String::with_capacity(mcid_map.len() * 50);
+        let mut prev_span: Option<&TextSpan> = None;
+        let mut consumed_mcids: HashSet<u32> = HashSet::new();
+
+        for content in &ordered_content {
+            if content.is_word_break {
+                if !text.is_empty() && !text.ends_with(' ') && !text.ends_with('\n') {
+                    text.push(' ');
+                }
+                continue;
+            }
+
+            if let Some(ref actual_text_val) = content.actual_text {
+                if !actual_text_val.is_empty() {
+                    if !text.is_empty() && !text.ends_with(' ') && !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push_str(actual_text_val);
+                    continue;
+                }
+            }
+
+            let Some(mcid) = content.mcid else {
+                continue;
+            };
+
+            if let Some(spans) = mcid_map.get(&mcid) {
+                consumed_mcids.insert(mcid);
+                for span in spans {
+                    if let Some(prev) = prev_span {
+                        let y_diff = (prev.bbox.y - span.bbox.y).abs();
+                        if y_diff > 2.0 {
+                            let font_size = span.font_size.max(10.0);
+                            let line_height = font_size * 1.2;
+                            let num_breaks = (y_diff / line_height).round() as usize;
+                            for _ in 0..num_breaks.clamp(1, 3) {
+                                text.push('\n');
+                            }
+                        } else if Self::should_insert_space(prev, span) {
+                            text.push(' ');
+                        }
+                    }
+
+                    for ch in span.text.chars() {
+                        if let Some(components) =
+                            crate::text::ligature_processor::get_ligature_components(ch)
+                        {
+                            text.push_str(components);
+                        } else {
+                            text.push(ch);
+                        }
+                    }
+                    prev_span = Some(span);
+                }
+            }
+        }
+
+        // Append spans with MCIDs not referenced by the structure tree
+        let unconsumed: Vec<(&u32, &Vec<TextSpan>)> = mcid_map
+            .iter()
+            .filter(|(mcid, _)| !consumed_mcids.contains(mcid))
+            .collect();
+        if !unconsumed.is_empty() {
+            log::debug!(
+                "Appending {} unreferenced MCIDs (e.g., from Form XObjects without StructParents)",
+                unconsumed.len()
+            );
+            for (_mcid, spans) in &unconsumed {
+                for span in *spans {
+                    if let Some(prev) = prev_span {
+                        let y_diff = (prev.bbox.y - span.bbox.y).abs();
+                        if y_diff > 2.0 {
+                            text.push('\n');
+                        } else if Self::should_insert_space(prev, span) {
+                            text.push(' ');
+                        }
+                    }
+                    for ch in span.text.chars() {
+                        if let Some(components) =
+                            crate::text::ligature_processor::get_ligature_components(ch)
+                        {
+                            text.push_str(components);
+                        } else {
+                            text.push(ch);
+                        }
+                    }
+                    prev_span = Some(span);
+                }
+            }
+        }
+
+        // Append any spans without MCID at the end
+        if !spans_without_mcid.is_empty() {
+            log::warn!(
+                "Found {} text spans without MCID - appending to end",
+                spans_without_mcid.len()
+            );
+            for span in &spans_without_mcid {
+                if let Some(prev) = prev_span {
+                    let y_diff = (prev.bbox.y - span.bbox.y).abs();
+                    if y_diff > 2.0 {
+                        text.push('\n');
+                    } else if Self::should_insert_space(prev, span) {
+                        text.push(' ');
+                    }
+                }
                 for ch in span.text.chars() {
                     if let Some(components) =
                         crate::text::ligature_processor::get_ligature_components(ch)

@@ -109,11 +109,10 @@ pub fn parse_structure_tree(document: &mut PdfDocument) -> Result<Option<StructT
         }
     }
 
-    // Parse ParentTree (optional)
-    if let Some(parent_tree_obj) = struct_tree_dict.get("ParentTree") {
-        let parent_tree = parse_parent_tree(document, parent_tree_obj)?;
-        struct_tree.parent_tree = Some(parent_tree);
-    }
+    // Skip ParentTree parsing — it's expensive (recursively loads/parses objects)
+    // and not needed for text extraction. The forward traversal of /K children
+    // provides reading order. ParentTree is only needed for reverse lookups
+    // (MCID → StructElem), which are not used in the extraction pipeline.
 
     // Parse K (children) - can be a single element or array of elements
     if let Some(k_obj) = struct_tree_dict.get("K") {
@@ -416,6 +415,7 @@ fn parse_marked_content_ref(
 /// This implementation handles:
 /// 1. Simple number trees with /Nums array (key-value pairs)
 /// 2. Complex number trees with /Kids array (recursive node traversal)
+#[allow(dead_code)]
 fn parse_parent_tree(document: &mut PdfDocument, obj: &Object) -> Result<ParentTree, Error> {
     let obj = resolve_object(document, obj)?;
 
@@ -467,6 +467,7 @@ fn parse_parent_tree(document: &mut PdfDocument, obj: &Object) -> Result<ParentT
 }
 
 /// Parse a single entry in the parent tree (can be StructElem or ObjectRef)
+#[allow(dead_code)]
 fn parse_parent_tree_entry(
     document: &mut PdfDocument,
     obj: &Object,
@@ -501,6 +502,7 @@ fn parse_parent_tree_entry(
 }
 
 /// Recursively parse a number tree kid node
+#[allow(dead_code)]
 fn parse_number_tree_kid(
     document: &mut PdfDocument,
     kid_obj: &Object,
