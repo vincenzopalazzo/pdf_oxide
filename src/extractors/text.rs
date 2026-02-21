@@ -17,6 +17,7 @@ use crate::object::{Object, ObjectRef};
 use crate::pipeline::config::WordBoundaryMode;
 use crate::text::{BoundaryContext, CharacterInfo, DocumentScript, WordBoundaryDetector};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Source of a space decision in the unified pipeline.
 ///
@@ -824,7 +825,7 @@ fn should_insert_space(
     gap_pt: f32,
     font_size: f32,
     font_name: &str,
-    fonts: &std::collections::HashMap<String, crate::fonts::FontInfo>,
+    fonts: &std::collections::HashMap<String, std::sync::Arc<crate::fonts::FontInfo>>,
     tj_offset_triggered: bool,
     config: &SpanMergingConfig,
     prev_bbox: Option<&crate::geometry::Rect>,
@@ -1282,11 +1283,15 @@ impl TjBuffer {
     }
 
     /// Append a text string to the buffer.
-    fn append(&mut self, bytes: &[u8], fonts: &HashMap<String, FontInfo>) -> Result<()> {
+    fn append(&mut self, bytes: &[u8], fonts: &HashMap<String, Arc<FontInfo>>) -> Result<()> {
         self.text.extend_from_slice(bytes);
 
         // Convert to Unicode using helper function
-        let font = self.font_name.as_ref().and_then(|name| fonts.get(name));
+        let font = self
+            .font_name
+            .as_ref()
+            .and_then(|name| fonts.get(name))
+            .map(|f| f.as_ref());
         let unicode_text = decode_text_to_unicode(bytes, font);
         self.unicode.push_str(&unicode_text);
 
@@ -1676,8 +1681,8 @@ struct MarkedContentContext {
 pub struct TextExtractor {
     /// Graphics state stack for handling q/Q operators
     state_stack: GraphicsStateStack,
-    /// Loaded fonts (name -> FontInfo)
-    fonts: HashMap<String, FontInfo>,
+    /// Loaded fonts (name -> FontInfo). Arc-wrapped to avoid deep cloning across pages.
+    fonts: HashMap<String, Arc<FontInfo>>,
     /// Extracted text spans (complete strings from Tj/TJ operators)
     spans: Vec<TextSpan>,
     /// Extracted characters (for backward compatibility)
@@ -1848,6 +1853,35 @@ impl TextExtractor {
     /// of this extractor. This is safe when used within PdfDocument methods.
     pub fn set_document(&mut self, document: *mut crate::document::PdfDocument) {
         self.document = Some(document);
+    }
+
+    // ========================================================================
+    // Debug/profiling helpers — exposed for examples/debug_katalog.rs
+    // ========================================================================
+
+    /// Convenience wrapper: set document from a mutable reference (avoids raw pointer in caller).
+    pub fn set_document_ptr(&mut self, doc: &mut crate::document::PdfDocument) {
+        self.document = Some(doc as *mut crate::document::PdfDocument);
+    }
+
+    /// Prepare for span extraction mode (same setup as extract_text_spans preamble).
+    pub fn prepare_for_span_extraction(&mut self) {
+        self.extract_spans = true;
+        self.spans.clear();
+        self.span_sequence_counter = 0;
+    }
+
+    /// Public wrapper for execute_operator (normally private).
+    pub fn execute_operator_public(
+        &mut self,
+        op: crate::content::Operator,
+    ) -> Result<()> {
+        self.execute_operator(op)
+    }
+
+    /// Public wrapper for flush_tj_span_buffer (normally private).
+    pub fn flush_public(&mut self) -> Result<()> {
+        self.flush_tj_span_buffer()
     }
 
     /// Calculate adaptive TJ offset threshold based on font size and text justification.
@@ -2225,7 +2259,20 @@ impl TextExtractor {
     /// # }
     /// ```
     pub fn add_font(&mut self, name: String, font: FontInfo) {
+        self.fonts.insert(name, Arc::new(font));
+    }
+
+    /// Add a pre-shared font (Arc-wrapped) to the extractor. Avoids deep cloning.
+    pub(crate) fn add_font_shared(&mut self, name: String, font: Arc<FontInfo>) {
         self.fonts.insert(name, font);
+    }
+
+    /// Return the current font set for caching purposes.
+    pub(crate) fn get_font_set(&self) -> Vec<(String, Arc<FontInfo>)> {
+        self.fonts
+            .iter()
+            .map(|(k, v)| (k.clone(), Arc::clone(v)))
+            .collect()
     }
 
     /// Share TrueType cmap tables between fonts with matching base font names.
@@ -2258,28 +2305,29 @@ impl TextExtractor {
         }
 
         // Second pass: find CIDFontType2 Identity-H fonts without truetype_cmap
-        for font in self.fonts.values_mut() {
-            if font.truetype_cmap.is_some() {
+        for font_arc in self.fonts.values_mut() {
+            if font_arc.truetype_cmap.is_some() {
                 continue;
             }
             // Only target Type0 CIDFontType2 with Identity-H encoding
-            if font.subtype != "Type0" {
+            if font_arc.subtype != "Type0" {
                 continue;
             }
-            let is_identity = matches!(&font.encoding, crate::fonts::Encoding::Identity)
-                || matches!(&font.encoding, crate::fonts::Encoding::Standard(ref n) if n.contains("Identity"));
+            let is_identity = matches!(&font_arc.encoding, crate::fonts::Encoding::Identity)
+                || matches!(&font_arc.encoding, crate::fonts::Encoding::Standard(ref n) if n.contains("Identity"));
             if !is_identity {
                 continue;
             }
 
-            let stripped = strip_subset(&font.base_font);
+            let stripped = strip_subset(&font_arc.base_font);
             for (donor_name, donor_cmap) in &cmap_donors {
                 if donor_name == stripped {
                     log::info!(
                         "Sharing TrueType cmap from donor font to '{}' (Identity-H, no embedded font)",
-                        font.base_font
+                        font_arc.base_font
                     );
-                    font.truetype_cmap = Some(donor_cmap.clone());
+                    // Use Arc::make_mut for copy-on-write: only clones if other Arcs exist
+                    Arc::make_mut(font_arc).truetype_cmap = Some(donor_cmap.clone());
                     break;
                 }
             }

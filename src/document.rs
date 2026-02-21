@@ -75,8 +75,12 @@ pub struct PdfDocument {
     /// Byte offset where PDF header was found (may not be 0 for malformed PDFs)
     #[allow(dead_code)]
     header_offset: u64,
-    /// Font cache keyed by indirect ObjectRef to avoid re-parsing fonts across pages
-    font_cache: HashMap<ObjectRef, crate::fonts::FontInfo>,
+    /// Font cache keyed by indirect ObjectRef to avoid re-parsing fonts across pages.
+    /// Arc-wrapped to eliminate deep cloning when populating per-page TextExtractor.
+    font_cache: HashMap<ObjectRef, Arc<crate::fonts::FontInfo>>,
+    /// Cached font sets keyed by /Font dictionary ObjectRef.
+    /// Pages sharing the same /Font dict skip the entire load_fonts() loop.
+    font_set_cache: HashMap<ObjectRef, Vec<(String, Arc<crate::fonts::FontInfo>)>>,
     /// Cached structure tree (None = not yet checked, Some(None) = untagged, Some(Some) = tagged).
     /// Uses Arc to avoid expensive deep clones on every page extraction.
     structure_tree_cache: Option<Option<Arc<crate::structure::StructTreeRoot>>>,
@@ -195,6 +199,7 @@ impl PdfDocument {
             options: ParserOptions::default(),
             header_offset,
             font_cache: HashMap::new(),
+            font_set_cache: HashMap::new(),
             structure_tree_cache: None,
             structure_content_cache: None,
             page_cache: HashMap::new(),
@@ -4623,25 +4628,39 @@ impl PdfDocument {
         // Get Font dictionary if present
         if let Some(font_obj) = resources_dict.get("Font") {
             // Font can be a reference or direct dictionary - need to dereference
-            let font_dict_obj = if let Some(font_ref) = font_obj.as_reference() {
+            let font_dict_ref = font_obj.as_reference();
+            let font_dict_obj = if let Some(font_ref) = font_dict_ref {
                 self.load_object(font_ref)?
             } else {
                 font_obj.clone()
             };
 
+            // Layer 2: Check font set cache for the /Font dictionary.
+            // Pages sharing the same /Font dict skip the entire per-font loop.
+            if let Some(font_dict_ref) = font_dict_ref {
+                if let Some(cached_set) = self.font_set_cache.get(&font_dict_ref) {
+                    for (name, font_arc) in cached_set {
+                        extractor.add_font_shared(name.clone(), Arc::clone(font_arc));
+                    }
+                    // share_truetype_cmaps already applied before caching — skip it
+                    return Ok(());
+                }
+            }
+
             if let Some(font_dict) = font_dict_obj.as_dict() {
                 for (name, font_obj) in font_dict {
-                    // If font is a reference, check cache first
+                    // If font is a reference, check per-font cache first
                     if let Some(font_ref) = font_obj.as_reference() {
                         if let Some(cached) = self.font_cache.get(&font_ref) {
-                            extractor.add_font(name.clone(), cached.clone());
+                            extractor.add_font_shared(name.clone(), Arc::clone(cached));
                             continue;
                         }
                         let font = self.load_object(font_ref)?;
                         match FontInfo::from_dict(&font, self) {
                             Ok(font_info) => {
-                                self.font_cache.insert(font_ref, font_info.clone());
-                                extractor.add_font(name.clone(), font_info);
+                                let arc = Arc::new(font_info);
+                                self.font_cache.insert(font_ref, Arc::clone(&arc));
+                                extractor.add_font_shared(name.clone(), arc);
                             },
                             Err(e) => {
                                 log::error!(
@@ -4679,6 +4698,14 @@ impl PdfDocument {
         // This handles PDFs that create paired font resources (e.g., a simple TrueType
         // font with embedded data + a CID font referencing the same base font without).
         extractor.share_truetype_cmaps();
+
+        // Layer 2: Cache the complete font set (post-sharing) for this /Font dict
+        if let Some(font_obj) = resources_dict.get("Font") {
+            if let Some(font_dict_ref) = font_obj.as_reference() {
+                self.font_set_cache
+                    .insert(font_dict_ref, extractor.get_font_set());
+            }
+        }
 
         Ok(())
     }
@@ -5921,6 +5948,36 @@ impl PdfDocument {
         }
 
         Ok(result)
+    }
+
+    // ========================================================================
+    // Debug/profiling helpers — thin pub wrappers over internal methods.
+    // Used by examples/debug_katalog.rs to break extract_spans into phases.
+    // ========================================================================
+
+    /// Public wrapper for `get_page` (normally private).
+    /// Exposed for profiling examples that need to time page tree lookup separately.
+    pub fn get_page_for_debug(
+        &mut self,
+        page_index: usize,
+    ) -> Result<Object> {
+        self.get_page(page_index)
+    }
+
+    /// Public wrapper for `may_contain_text` (normally pub(crate)).
+    /// Returns true if the content stream might contain text operators (BT or Do).
+    pub fn may_contain_text_public(data: &[u8]) -> bool {
+        Self::may_contain_text(data)
+    }
+
+    /// Public wrapper for `load_fonts` (normally pub(crate)).
+    /// Loads font dictionaries from a resources object into a TextExtractor.
+    pub fn load_fonts_public(
+        &mut self,
+        resources: &Object,
+        extractor: &mut crate::extractors::TextExtractor,
+    ) -> Result<()> {
+        self.load_fonts(resources, extractor)
     }
 }
 
