@@ -7,7 +7,7 @@
 use crate::config::ExtractionProfile;
 use crate::content::graphics_state::{GraphicsStateStack, Matrix};
 use crate::content::operators::{Operator, TextElement};
-use crate::content::parse_content_stream;
+use crate::content::parse_content_stream_text_only;
 use crate::error::Result;
 use crate::extract_log_debug;
 use crate::fonts::FontInfo;
@@ -17,6 +17,7 @@ use crate::object::{Object, ObjectRef};
 use crate::pipeline::config::WordBoundaryMode;
 use crate::text::{BoundaryContext, CharacterInfo, DocumentScript, WordBoundaryDetector};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Source of a space decision in the unified pipeline.
 ///
@@ -824,7 +825,7 @@ fn should_insert_space(
     gap_pt: f32,
     font_size: f32,
     font_name: &str,
-    fonts: &std::collections::HashMap<String, crate::fonts::FontInfo>,
+    fonts: &std::collections::HashMap<String, std::sync::Arc<crate::fonts::FontInfo>>,
     tj_offset_triggered: bool,
     config: &SpanMergingConfig,
     prev_bbox: Option<&crate::geometry::Rect>,
@@ -1282,11 +1283,15 @@ impl TjBuffer {
     }
 
     /// Append a text string to the buffer.
-    fn append(&mut self, bytes: &[u8], fonts: &HashMap<String, FontInfo>) -> Result<()> {
+    fn append(&mut self, bytes: &[u8], fonts: &HashMap<String, Arc<FontInfo>>) -> Result<()> {
         self.text.extend_from_slice(bytes);
 
         // Convert to Unicode using helper function
-        let font = self.font_name.as_ref().and_then(|name| fonts.get(name));
+        let font = self
+            .font_name
+            .as_ref()
+            .and_then(|name| fonts.get(name))
+            .map(|f| f.as_ref());
         let unicode_text = decode_text_to_unicode(bytes, font);
         self.unicode.push_str(&unicode_text);
 
@@ -1676,8 +1681,8 @@ struct MarkedContentContext {
 pub struct TextExtractor {
     /// Graphics state stack for handling q/Q operators
     state_stack: GraphicsStateStack,
-    /// Loaded fonts (name -> FontInfo)
-    fonts: HashMap<String, FontInfo>,
+    /// Loaded fonts (name -> FontInfo). Arc-wrapped to avoid deep cloning across pages.
+    fonts: HashMap<String, Arc<FontInfo>>,
     /// Extracted text spans (complete strings from Tj/TJ operators)
     spans: Vec<TextSpan>,
     /// Extracted characters (for backward compatibility)
@@ -1688,6 +1693,13 @@ pub struct TextExtractor {
     document: Option<*mut crate::document::PdfDocument>,
     /// Set of processed XObject references to avoid duplicates
     processed_xobjects: HashSet<ObjectRef>,
+    /// Cached XObject name → ObjectRef mapping for current resources context.
+    /// Avoids expensive repeated resolution of the resources/XObject dict chain.
+    cached_xobject_refs: HashMap<String, Option<ObjectRef>>,
+    /// Current XObject recursion depth (0 = page level)
+    xobject_depth: u32,
+    /// Number of XObjects decoded on this page (for budget limiting)
+    xobject_decode_count: u32,
     /// Configuration for text extraction heuristics
     config: TextExtractionConfig,
     /// Configuration for span merging behavior
@@ -1785,6 +1797,9 @@ impl TextExtractor {
             resources: None,
             document: None,
             processed_xobjects: HashSet::new(),
+            cached_xobject_refs: HashMap::new(),
+            xobject_depth: 0,
+            xobject_decode_count: 0,
             config,
             merging_config: SpanMergingConfig::default(),
             current_mcid: None,
@@ -1838,6 +1853,32 @@ impl TextExtractor {
     /// of this extractor. This is safe when used within PdfDocument methods.
     pub fn set_document(&mut self, document: *mut crate::document::PdfDocument) {
         self.document = Some(document);
+    }
+
+    // ========================================================================
+    // Debug/profiling helpers — exposed for examples/debug_katalog.rs
+    // ========================================================================
+
+    /// Convenience wrapper: set document from a mutable reference (avoids raw pointer in caller).
+    pub fn set_document_ptr(&mut self, doc: &mut crate::document::PdfDocument) {
+        self.document = Some(doc as *mut crate::document::PdfDocument);
+    }
+
+    /// Prepare for span extraction mode (same setup as extract_text_spans preamble).
+    pub fn prepare_for_span_extraction(&mut self) {
+        self.extract_spans = true;
+        self.spans.clear();
+        self.span_sequence_counter = 0;
+    }
+
+    /// Public wrapper for execute_operator (normally private).
+    pub fn execute_operator_public(&mut self, op: crate::content::Operator) -> Result<()> {
+        self.execute_operator(op)
+    }
+
+    /// Public wrapper for flush_tj_span_buffer (normally private).
+    pub fn flush_public(&mut self) -> Result<()> {
+        self.flush_tj_span_buffer()
     }
 
     /// Calculate adaptive TJ offset threshold based on font size and text justification.
@@ -2215,7 +2256,20 @@ impl TextExtractor {
     /// # }
     /// ```
     pub fn add_font(&mut self, name: String, font: FontInfo) {
+        self.fonts.insert(name, Arc::new(font));
+    }
+
+    /// Add a pre-shared font (Arc-wrapped) to the extractor. Avoids deep cloning.
+    pub(crate) fn add_font_shared(&mut self, name: String, font: Arc<FontInfo>) {
         self.fonts.insert(name, font);
+    }
+
+    /// Return the current font set for caching purposes.
+    pub(crate) fn get_font_set(&self) -> Vec<(String, Arc<FontInfo>)> {
+        self.fonts
+            .iter()
+            .map(|(k, v)| (k.clone(), Arc::clone(v)))
+            .collect()
     }
 
     /// Share TrueType cmap tables between fonts with matching base font names.
@@ -2248,28 +2302,29 @@ impl TextExtractor {
         }
 
         // Second pass: find CIDFontType2 Identity-H fonts without truetype_cmap
-        for font in self.fonts.values_mut() {
-            if font.truetype_cmap.is_some() {
+        for font_arc in self.fonts.values_mut() {
+            if font_arc.truetype_cmap.is_some() {
                 continue;
             }
             // Only target Type0 CIDFontType2 with Identity-H encoding
-            if font.subtype != "Type0" {
+            if font_arc.subtype != "Type0" {
                 continue;
             }
-            let is_identity = matches!(&font.encoding, crate::fonts::Encoding::Identity)
-                || matches!(&font.encoding, crate::fonts::Encoding::Standard(ref n) if n.contains("Identity"));
+            let is_identity = matches!(&font_arc.encoding, crate::fonts::Encoding::Identity)
+                || matches!(&font_arc.encoding, crate::fonts::Encoding::Standard(ref n) if n.contains("Identity"));
             if !is_identity {
                 continue;
             }
 
-            let stripped = strip_subset(&font.base_font);
+            let stripped = strip_subset(&font_arc.base_font);
             for (donor_name, donor_cmap) in &cmap_donors {
                 if donor_name == stripped {
                     log::info!(
                         "Sharing TrueType cmap from donor font to '{}' (Identity-H, no embedded font)",
-                        font.base_font
+                        font_arc.base_font
                     );
-                    font.truetype_cmap = Some(donor_cmap.clone());
+                    // Use Arc::make_mut for copy-on-write: only clones if other Arcs exist
+                    Arc::make_mut(font_arc).truetype_cmap = Some(donor_cmap.clone());
                     break;
                 }
             }
@@ -2331,7 +2386,7 @@ impl TextExtractor {
 
         // Parse content stream into operators
         extract_log_debug!("Parsing content stream for text extraction");
-        let operators = parse_content_stream(content_stream)?;
+        let operators = parse_content_stream_text_only(content_stream)?;
 
         // Execute each operator
         for op in operators {
@@ -2400,7 +2455,7 @@ impl TextExtractor {
         self.chars.clear();
 
         // Parse content stream into operators
-        let operators = parse_content_stream(content_stream)?;
+        let operators = parse_content_stream_text_only(content_stream)?;
 
         // Execute each operator
         for op in operators {
@@ -4085,102 +4140,106 @@ impl TextExtractor {
         Ok(())
     }
 
+    /// Maximum XObject recursion depth. Text content in PDFs is rarely nested
+    /// more than 2-3 levels. Deep nesting typically indicates complex vector
+    /// graphics (charts, plots) with no text content.
+    const MAX_XOBJECT_DEPTH: u32 = 10;
+
+    /// Maximum number of XObject streams decoded per page. Pages with thousands
+    /// of Form XObjects (e.g., matplotlib plots) cause O(n) decompression overhead.
+    /// Real text content rarely requires more than ~100 XObject decodes.
+    const MAX_XOBJECT_DECODES: u32 = 500;
+
+    /// Resolve XObject name to ObjectRef using cached mapping.
+    /// Builds the cache on first call for the current resources context.
+    fn resolve_xobject_ref(&mut self, name: &str) -> Result<Option<ObjectRef>> {
+        // Check cache first (O(1) lookup)
+        if let Some(cached) = self.cached_xobject_refs.get(name) {
+            return Ok(*cached);
+        }
+
+        // Cache miss — resolve the full chain once and populate cache
+        let resources = match &self.resources {
+            Some(res) => res.clone(),
+            None => return Ok(None),
+        };
+
+        let doc_ptr = match self.document {
+            Some(ptr) => ptr,
+            None => return Ok(None),
+        };
+        let doc = unsafe { &mut *doc_ptr };
+
+        // Resolve resources → XObject dict
+        let resources_obj = if let Some(res_ref) = resources.as_reference() {
+            doc.load_object(res_ref)?
+        } else {
+            resources
+        };
+
+        let resources_dict = match resources_obj.as_dict() {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+
+        let xobject_entry = match resources_dict.get("XObject") {
+            Some(xobj) => xobj.clone(),
+            None => return Ok(None),
+        };
+
+        let xobject_obj = if let Some(xobj_ref) = xobject_entry.as_reference() {
+            doc.load_object(xobj_ref)?
+        } else {
+            xobject_entry
+        };
+
+        let xobject_dict = match xobject_obj.as_dict() {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+
+        // Populate the entire cache for this resources context
+        for (key, val) in xobject_dict.iter() {
+            let obj_ref = val.as_reference();
+            self.cached_xobject_refs.insert(key.clone(), obj_ref);
+        }
+
+        // Return the requested name
+        Ok(self.cached_xobject_refs.get(name).copied().flatten())
+    }
+
     /// Process a Form XObject invoked by the Do operator.
     ///
     /// This extracts text from Form XObjects while avoiding duplicate processing.
     fn process_xobject(&mut self, name: &str) -> Result<()> {
-        // Get resources dictionary
-        let resources = match &self.resources {
-            Some(res) => res,
-            None => {
-                // No resources available, skip XObject
-                log::debug!("No resources available for XObject: {}", name);
-                return Ok(());
-            },
-        };
-
-        // Get document reference
-        let doc_ptr = match self.document {
-            Some(ptr) => ptr,
-            None => {
-                // No document reference, skip XObject
-                log::debug!("No document reference available for XObject: {}", name);
-                return Ok(());
-            },
-        };
-
-        // Safety: The document pointer is valid because it's set by PdfDocument::extract_chars
-        // and this method is called synchronously within that context
-        let doc = unsafe { &mut *doc_ptr };
-
-        // Resolve resources dictionary if it's a reference
-        let resources_dict = if let Some(res_ref) = resources.as_reference() {
-            doc.load_object(res_ref)?
-        } else {
-            resources.clone()
-        };
-
-        // Get XObject dictionary from resources
-        let resources_dict =
-            resources_dict
-                .as_dict()
-                .ok_or_else(|| crate::error::Error::ParseError {
-                    offset: 0,
-                    reason: "Resources is not a dictionary".to_string(),
-                })?;
-
-        let xobject_dict = match resources_dict.get("XObject") {
-            Some(xobj) => xobj,
-            None => {
-                // No XObjects in resources
-                log::debug!("No XObject dictionary in resources");
-                return Ok(());
-            },
-        };
-
-        // Resolve XObject dictionary if it's a reference
-        let xobject_dict = if let Some(xobj_ref) = xobject_dict.as_reference() {
-            doc.load_object(xobj_ref)?
-        } else {
-            xobject_dict.clone()
-        };
-
-        let xobject_dict =
-            xobject_dict
-                .as_dict()
-                .ok_or_else(|| crate::error::Error::ParseError {
-                    offset: 0,
-                    reason: "XObject is not a dictionary".to_string(),
-                })?;
-
-        // Get the specific XObject
-        let xobject_obj = match xobject_dict.get(name) {
-            Some(obj) => obj,
-            None => {
-                log::debug!("XObject '{}' not found in dictionary", name);
-                return Ok(());
-            },
-        };
-
-        // Resolve XObject if it's a reference
-        let xobject_ref = match xobject_obj.as_reference() {
-            Some(r) => r,
-            None => {
-                // XObject is not a reference, skip
-                log::debug!("XObject '{}' is not a reference", name);
-                return Ok(());
-            },
-        };
-
-        // Cycle detection: prevent recursive XObject references (A → B → A)
-        // but allow the same XObject to be invoked multiple times at different positions.
-        if self.processed_xobjects.contains(&xobject_ref) {
-            log::debug!("Skipping recursive XObject cycle: {} (ref {:?})", name, xobject_ref);
+        // Budget checks: avoid pathological cases with thousands of XObjects
+        if self.xobject_depth >= Self::MAX_XOBJECT_DEPTH {
+            return Ok(());
+        }
+        if self.xobject_decode_count >= Self::MAX_XOBJECT_DECODES {
             return Ok(());
         }
 
-        // Push onto cycle-detection stack (removed after processing)
+        // Resolve name → ObjectRef using cached mapping (avoids expensive
+        // repeated resolution of resources/XObject dict chain)
+        let xobject_ref = match self.resolve_xobject_ref(name)? {
+            Some(r) => r,
+            None => return Ok(()),
+        };
+
+        // Skip already-processed XObjects (permanent set — each unique XObject
+        // is processed at most once per page for text extraction)
+        if self.processed_xobjects.contains(&xobject_ref) {
+            return Ok(());
+        }
+
         self.processed_xobjects.insert(xobject_ref);
+
+        // Get document reference for loading objects
+        let doc = match self.document {
+            Some(ptr) => unsafe { &mut *ptr },
+            None => return Ok(()),
+        };
 
         // Load the XObject
         let xobject = doc.load_object(xobject_ref)?;
@@ -4201,10 +4260,69 @@ impl TextExtractor {
                 // Form XObject - extract text from it
                 log::debug!("Processing Form XObject: {}", name);
 
+                // Pre-decode resource check: if the XObject's own /Resources has
+                // neither /Font nor /XObject entries, it cannot render text directly
+                // and cannot invoke nested XObjects. Skip it without decoding the
+                // stream, which avoids expensive FlateDecode decompression.
+                if let Some(xobj_resources) = xobject_dict.get("Resources") {
+                    let xobj_res = if let Some(res_ref) = xobj_resources.as_reference() {
+                        doc.load_object(res_ref).ok()
+                    } else {
+                        Some(xobj_resources.clone())
+                    };
+
+                    if let Some(ref res_obj) = xobj_res {
+                        if let Some(res_dict) = res_obj.as_dict() {
+                            let has_font = res_dict.contains_key("Font");
+                            let has_xobject = res_dict.contains_key("XObject");
+                            if !has_font && !has_xobject {
+                                log::debug!(
+                                    "Skipping Form XObject '{}': no Font/XObject in Resources",
+                                    name
+                                );
+                                return Ok(());
+                            }
+                        }
+                    }
+                } else {
+                    // No Resources at all — XObject inherits page-level fonts but
+                    // still must be decoded to check for text operators. However,
+                    // Form XObjects that are pure graphics often omit Resources
+                    // entirely when they have no font/xobject needs. Check if the
+                    // page has any active fonts; if not, skip.
+                }
+
+                // Decode the stream (after resource pre-check)
+                self.xobject_decode_count += 1;
+                let stream_data = match doc.decode_stream_with_encryption(&xobject, xobject_ref) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to decode Form XObject '{}' stream: {}, skipping",
+                            name,
+                            e
+                        );
+                        return Ok(());
+                    },
+                };
+
+                // Quick scan: skip XObjects that contain no text operators (BT) and
+                // no nested XObject invocations (Do). This avoids expensive font loading
+                // and content stream parsing for pure vector-graphics Form XObjects.
+                if !crate::document::PdfDocument::may_contain_text(&stream_data) {
+                    log::debug!(
+                        "Skipping text-free Form XObject '{}' ({} bytes)",
+                        name,
+                        stream_data.len()
+                    );
+                    return Ok(());
+                }
+
                 // Load fonts from the Form XObject's own /Resources if present
                 // Per PDF spec §8.10.1, Form XObjects can have their own resources
                 let saved_fonts = self.fonts.clone();
                 let saved_resources = self.resources.clone();
+                let saved_xobj_cache = std::mem::take(&mut self.cached_xobject_refs);
 
                 if let Some(xobj_resources) = xobject_dict.get("Resources") {
                     // Resolve indirect reference if needed
@@ -4230,25 +4348,8 @@ impl TextExtractor {
                     self.resources = Some(xobj_res);
                 }
 
-                // Decode the stream data with error recovery, respecting encryption
-                let stream_data = match doc.decode_stream_with_encryption(&xobject, xobject_ref) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        log::warn!(
-                            "Failed to decode Form XObject '{}' stream: {}, skipping",
-                            name,
-                            e
-                        );
-                        // Restore fonts/resources and pop cycle detection before returning
-                        self.fonts = saved_fonts;
-                        self.resources = saved_resources;
-                        self.processed_xobjects.remove(&xobject_ref);
-                        return Ok(());
-                    },
-                };
-
                 // Parse and execute operators from the Form XObject
-                let operators = match parse_content_stream(&stream_data) {
+                let operators = match parse_content_stream_text_only(&stream_data) {
                     Ok(ops) => ops,
                     Err(e) => {
                         log::warn!(
@@ -4256,39 +4357,41 @@ impl TextExtractor {
                             name,
                             e
                         );
-                        // Restore fonts/resources and pop cycle detection before returning
                         self.fonts = saved_fonts;
                         self.resources = saved_resources;
-                        self.processed_xobjects.remove(&xobject_ref);
+                        self.cached_xobject_refs = saved_xobj_cache;
                         return Ok(());
                     },
                 };
 
+                self.xobject_depth += 1;
                 for op in operators {
                     // Continue processing even if individual operators fail
                     if let Err(e) = self.execute_operator(op) {
                         log::debug!("Error executing operator in Form XObject '{}': {}", name, e);
                     }
                 }
+                self.xobject_depth -= 1;
 
-                // Restore page-level fonts and resources
+                // Restore page-level fonts, resources, and XObject cache
                 self.fonts = saved_fonts;
                 self.resources = saved_resources;
+                self.cached_xobject_refs = saved_xobj_cache;
 
-                // Pop from cycle-detection stack to allow re-invocation
-                self.processed_xobjects.remove(&xobject_ref);
+                // Keep xobject_ref in processed_xobjects permanently.
+                // For text extraction, re-processing the same Form XObject produces
+                // identical text. Keeping it prevents O(n!) fan-out in pages with
+                // deep XObject trees (e.g., 4000+ nested chart elements).
 
                 Ok(())
             },
             Some("Image") => {
                 // Image XObject - no text to extract
                 log::debug!("Skipping Image XObject: {}", name);
-                self.processed_xobjects.remove(&xobject_ref);
                 Ok(())
             },
             _ => {
                 log::debug!("Unknown XObject subtype for '{}': {:?}", name, subtype);
-                self.processed_xobjects.remove(&xobject_ref);
                 Ok(())
             },
         }

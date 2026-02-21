@@ -7,7 +7,7 @@
 use super::adobe_glyph_list::ADOBE_GLYPH_LIST;
 use crate::document::PdfDocument;
 use crate::error::{Error, Result};
-use crate::fonts::cmap::{parse_tounicode_cmap, LazyCMap};
+use crate::fonts::cmap::LazyCMap;
 use crate::fonts::TrueTypeCMap;
 use crate::layout::text_block::FontWeight;
 use crate::object::Object;
@@ -490,18 +490,14 @@ impl FontInfo {
                 .and_then(|cmap_obj| doc.decode_stream_with_encryption(&cmap_obj, cmap_ref).ok());
 
             if let Some(stream_bytes) = stream_opt {
-                // Verify the stream is valid by attempting to parse it
-                if parse_tounicode_cmap(&stream_bytes).is_ok() {
-                    log::info!(
-                        "ToUnicode CMap stream loaded for font '{}': {} bytes (lazy parsing enabled)",
-                        base_font,
-                        stream_bytes.len()
-                    );
-                    Some(LazyCMap::new(stream_bytes))
-                } else {
-                    log::warn!("Failed to parse ToUnicode CMap stream for font '{}'", base_font);
-                    None
-                }
+                // Store raw bytes for lazy parsing — LazyCMap handles errors on first access.
+                // Skipping eager validation avoids parsing every CMap twice.
+                log::info!(
+                    "ToUnicode CMap stream loaded for font '{}': {} bytes (lazy parsing enabled)",
+                    base_font,
+                    stream_bytes.len()
+                );
+                Some(LazyCMap::new(stream_bytes))
             } else {
                 log::warn!("Failed to decode ToUnicode CMap stream for font '{}'", base_font);
                 None

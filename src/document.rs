@@ -18,6 +18,7 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Arc;
 
 /// Maximum recursion depth for object resolution
 const MAX_RECURSION_DEPTH: u32 = 100;
@@ -74,10 +75,18 @@ pub struct PdfDocument {
     /// Byte offset where PDF header was found (may not be 0 for malformed PDFs)
     #[allow(dead_code)]
     header_offset: u64,
-    /// Font cache keyed by indirect ObjectRef to avoid re-parsing fonts across pages
-    font_cache: HashMap<ObjectRef, crate::fonts::FontInfo>,
-    /// Cached structure tree (None = not yet checked, Some(None) = untagged, Some(Some) = tagged)
-    structure_tree_cache: Option<Option<crate::structure::StructTreeRoot>>,
+    /// Font cache keyed by indirect ObjectRef to avoid re-parsing fonts across pages.
+    /// Arc-wrapped to eliminate deep cloning when populating per-page TextExtractor.
+    font_cache: HashMap<ObjectRef, Arc<crate::fonts::FontInfo>>,
+    /// Cached font sets keyed by /Font dictionary ObjectRef.
+    /// Pages sharing the same /Font dict skip the entire load_fonts() loop.
+    font_set_cache: HashMap<ObjectRef, Vec<(String, Arc<crate::fonts::FontInfo>)>>,
+    /// Cached structure tree (None = not yet checked, Some(None) = untagged, Some(Some) = tagged).
+    /// Uses Arc to avoid expensive deep clones on every page extraction.
+    structure_tree_cache: Option<Option<Arc<crate::structure::StructTreeRoot>>>,
+    /// Cached per-page structure tree traversal results.
+    /// Built once from the structure tree, then O(1) lookup per page.
+    structure_content_cache: Option<HashMap<u32, Vec<crate::structure::OrderedContent>>>,
     /// Page object cache keyed by page index to avoid re-traversing the page tree.
     /// The page tree structure is static (§7.7.3.2), so pages can be safely cached.
     page_cache: HashMap<usize, Object>,
@@ -190,7 +199,9 @@ impl PdfDocument {
             options: ParserOptions::default(),
             header_offset,
             font_cache: HashMap::new(),
+            font_set_cache: HashMap::new(),
             structure_tree_cache: None,
+            structure_content_cache: None,
             page_cache: HashMap::new(),
             page_cache_populated: false,
             scanned_object_offsets: None,
@@ -2358,18 +2369,25 @@ impl PdfDocument {
         // For Tagged PDFs, use structure tree for reading order (spec-compliant)
         // For Untagged PDFs, use page content order (spec-compliant)
 
-        // Check if this is a Tagged PDF with structure tree (cached after first check)
+        // Check if this is a Tagged PDF with structure tree (cached after first check).
+        // Uses Arc to avoid expensive deep clones of the tree on every page.
         let cached_tree = match &self.structure_tree_cache {
-            Some(cached) => cached.clone(),
+            Some(cached) => cached.clone(), // Arc clone = cheap ref count bump
             None => {
-                let tree = self.structure_tree().ok().flatten();
+                let tree = self.structure_tree().ok().flatten().map(Arc::new);
                 self.structure_tree_cache = Some(tree.clone());
                 tree
             },
         };
 
         if let Some(struct_tree) = cached_tree {
-            return self.extract_text_structure_order(page_index, &struct_tree);
+            // Build per-page traversal cache once, then O(1) lookup per page.
+            // This avoids re-traversing the entire structure tree for each page.
+            if self.structure_content_cache.is_none() {
+                let all_content = crate::structure::traverse_structure_tree_all_pages(&struct_tree);
+                self.structure_content_cache = Some(all_content);
+            }
+            return self.extract_text_structure_order_cached(page_index);
         }
 
         // Untagged PDF: Use page content order (current implementation)
@@ -2968,7 +2986,7 @@ impl PdfDocument {
     /// Per §9.4.3, text-showing operators shall only appear within BT...ET text
     /// objects. However, a page may contain text only inside Form XObjects
     /// referenced via `Do` operators, so we must also check for those.
-    fn may_contain_text(data: &[u8]) -> bool {
+    pub(crate) fn may_contain_text(data: &[u8]) -> bool {
         // PDF delimiter characters per ISO 32000-1:2008 Table 2
         fn is_delimiter(b: u8) -> bool {
             matches!(b, b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%')
@@ -3031,6 +3049,7 @@ impl PdfDocument {
     /// // This is called automatically by extract_text() for Tagged PDFs
     /// let text = doc.extract_text(0)?;
     /// ```
+    #[allow(dead_code)]
     fn extract_text_structure_order(
         &mut self,
         page_index: usize,
@@ -3195,6 +3214,176 @@ impl PdfDocument {
                     }
                 }
                 // Expand ligature characters
+                for ch in span.text.chars() {
+                    if let Some(components) =
+                        crate::text::ligature_processor::get_ligature_components(ch)
+                    {
+                        text.push_str(components);
+                    } else {
+                        text.push(ch);
+                    }
+                }
+                prev_span = Some(span);
+            }
+        }
+
+        // Append text from form fields and annotations
+        self.append_annotation_text(page_index, &mut text);
+
+        Ok(text)
+    }
+
+    /// Extract text from a Tagged PDF page using pre-computed structure traversal cache.
+    ///
+    /// This is the optimized version of `extract_text_structure_order` that uses
+    /// the pre-built `structure_content_cache` for O(1) page content lookup instead
+    /// of re-traversing the entire structure tree for each page.
+    fn extract_text_structure_order_cached(&mut self, page_index: usize) -> Result<String> {
+        log::debug!("Extracting text using cached structure order for page {}", page_index);
+
+        // Step 1: Extract all spans with MCIDs
+        let all_spans = self.extract_spans(page_index)?;
+
+        if all_spans.is_empty() {
+            let mut text = String::new();
+            self.append_annotation_text(page_index, &mut text);
+            return Ok(text);
+        }
+
+        // Step 2: Build MCID → Vec<TextSpan> map
+        let mut mcid_map: HashMap<u32, Vec<TextSpan>> = HashMap::new();
+        let mut spans_without_mcid: Vec<TextSpan> = Vec::new();
+
+        for span in all_spans {
+            if let Some(mcid) = span.mcid {
+                mcid_map.entry(mcid).or_default().push(span);
+            } else {
+                spans_without_mcid.push(span);
+            }
+        }
+
+        // Step 3: Get pre-computed ordered content for this page (O(1) lookup)
+        let empty_content = Vec::new();
+        let ordered_content = self
+            .structure_content_cache
+            .as_ref()
+            .and_then(|cache| cache.get(&(page_index as u32)))
+            .unwrap_or(&empty_content);
+
+        log::debug!(
+            "Cached structure content: {} items for page {}, {} MCIDs with spans",
+            ordered_content.len(),
+            page_index,
+            mcid_map.len()
+        );
+
+        // Step 4: Assemble text in structure order
+        let mut text = String::with_capacity(mcid_map.len() * 50);
+        let mut prev_span: Option<&TextSpan> = None;
+        let mut consumed_mcids: HashSet<u32> = HashSet::new();
+
+        for content in ordered_content {
+            if content.is_word_break {
+                if !text.is_empty() && !text.ends_with(' ') && !text.ends_with('\n') {
+                    text.push(' ');
+                }
+                continue;
+            }
+
+            if let Some(ref actual_text_val) = content.actual_text {
+                if !actual_text_val.is_empty() {
+                    if !text.is_empty() && !text.ends_with(' ') && !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push_str(actual_text_val);
+                    continue;
+                }
+            }
+
+            let Some(mcid) = content.mcid else {
+                continue;
+            };
+
+            if let Some(spans) = mcid_map.get(&mcid) {
+                consumed_mcids.insert(mcid);
+                for span in spans {
+                    if let Some(prev) = prev_span {
+                        let y_diff = (prev.bbox.y - span.bbox.y).abs();
+                        if y_diff > 2.0 {
+                            let font_size = span.font_size.max(10.0);
+                            let line_height = font_size * 1.2;
+                            let num_breaks = (y_diff / line_height).round() as usize;
+                            for _ in 0..num_breaks.clamp(1, 3) {
+                                text.push('\n');
+                            }
+                        } else if Self::should_insert_space(prev, span) {
+                            text.push(' ');
+                        }
+                    }
+
+                    for ch in span.text.chars() {
+                        if let Some(components) =
+                            crate::text::ligature_processor::get_ligature_components(ch)
+                        {
+                            text.push_str(components);
+                        } else {
+                            text.push(ch);
+                        }
+                    }
+                    prev_span = Some(span);
+                }
+            }
+        }
+
+        // Append spans with MCIDs not referenced by the structure tree
+        let unconsumed: Vec<(&u32, &Vec<TextSpan>)> = mcid_map
+            .iter()
+            .filter(|(mcid, _)| !consumed_mcids.contains(mcid))
+            .collect();
+        if !unconsumed.is_empty() {
+            log::debug!(
+                "Appending {} unreferenced MCIDs (e.g., from Form XObjects without StructParents)",
+                unconsumed.len()
+            );
+            for (_mcid, spans) in &unconsumed {
+                for span in *spans {
+                    if let Some(prev) = prev_span {
+                        let y_diff = (prev.bbox.y - span.bbox.y).abs();
+                        if y_diff > 2.0 {
+                            text.push('\n');
+                        } else if Self::should_insert_space(prev, span) {
+                            text.push(' ');
+                        }
+                    }
+                    for ch in span.text.chars() {
+                        if let Some(components) =
+                            crate::text::ligature_processor::get_ligature_components(ch)
+                        {
+                            text.push_str(components);
+                        } else {
+                            text.push(ch);
+                        }
+                    }
+                    prev_span = Some(span);
+                }
+            }
+        }
+
+        // Append any spans without MCID at the end
+        if !spans_without_mcid.is_empty() {
+            log::warn!(
+                "Found {} text spans without MCID - appending to end",
+                spans_without_mcid.len()
+            );
+            for span in &spans_without_mcid {
+                if let Some(prev) = prev_span {
+                    let y_diff = (prev.bbox.y - span.bbox.y).abs();
+                    if y_diff > 2.0 {
+                        text.push('\n');
+                    } else if Self::should_insert_space(prev, span) {
+                        text.push(' ');
+                    }
+                }
                 for ch in span.text.chars() {
                     if let Some(components) =
                         crate::text::ligature_processor::get_ligature_components(ch)
@@ -4436,25 +4625,39 @@ impl PdfDocument {
         // Get Font dictionary if present
         if let Some(font_obj) = resources_dict.get("Font") {
             // Font can be a reference or direct dictionary - need to dereference
-            let font_dict_obj = if let Some(font_ref) = font_obj.as_reference() {
+            let font_dict_ref = font_obj.as_reference();
+            let font_dict_obj = if let Some(font_ref) = font_dict_ref {
                 self.load_object(font_ref)?
             } else {
                 font_obj.clone()
             };
 
+            // Layer 2: Check font set cache for the /Font dictionary.
+            // Pages sharing the same /Font dict skip the entire per-font loop.
+            if let Some(font_dict_ref) = font_dict_ref {
+                if let Some(cached_set) = self.font_set_cache.get(&font_dict_ref) {
+                    for (name, font_arc) in cached_set {
+                        extractor.add_font_shared(name.clone(), Arc::clone(font_arc));
+                    }
+                    // share_truetype_cmaps already applied before caching — skip it
+                    return Ok(());
+                }
+            }
+
             if let Some(font_dict) = font_dict_obj.as_dict() {
                 for (name, font_obj) in font_dict {
-                    // If font is a reference, check cache first
+                    // If font is a reference, check per-font cache first
                     if let Some(font_ref) = font_obj.as_reference() {
                         if let Some(cached) = self.font_cache.get(&font_ref) {
-                            extractor.add_font(name.clone(), cached.clone());
+                            extractor.add_font_shared(name.clone(), Arc::clone(cached));
                             continue;
                         }
                         let font = self.load_object(font_ref)?;
                         match FontInfo::from_dict(&font, self) {
                             Ok(font_info) => {
-                                self.font_cache.insert(font_ref, font_info.clone());
-                                extractor.add_font(name.clone(), font_info);
+                                let arc = Arc::new(font_info);
+                                self.font_cache.insert(font_ref, Arc::clone(&arc));
+                                extractor.add_font_shared(name.clone(), arc);
                             },
                             Err(e) => {
                                 log::error!(
@@ -4492,6 +4695,14 @@ impl PdfDocument {
         // This handles PDFs that create paired font resources (e.g., a simple TrueType
         // font with embedded data + a CID font referencing the same base font without).
         extractor.share_truetype_cmaps();
+
+        // Layer 2: Cache the complete font set (post-sharing) for this /Font dict
+        if let Some(font_obj) = resources_dict.get("Font") {
+            if let Some(font_dict_ref) = font_obj.as_reference() {
+                self.font_set_cache
+                    .insert(font_dict_ref, extractor.get_font_set());
+            }
+        }
 
         Ok(())
     }
@@ -5734,6 +5945,33 @@ impl PdfDocument {
         }
 
         Ok(result)
+    }
+
+    // ========================================================================
+    // Debug/profiling helpers — thin pub wrappers over internal methods.
+    // Used by examples/debug_katalog.rs to break extract_spans into phases.
+    // ========================================================================
+
+    /// Public wrapper for `get_page` (normally private).
+    /// Exposed for profiling examples that need to time page tree lookup separately.
+    pub fn get_page_for_debug(&mut self, page_index: usize) -> Result<Object> {
+        self.get_page(page_index)
+    }
+
+    /// Public wrapper for `may_contain_text` (normally pub(crate)).
+    /// Returns true if the content stream might contain text operators (BT or Do).
+    pub fn may_contain_text_public(data: &[u8]) -> bool {
+        Self::may_contain_text(data)
+    }
+
+    /// Public wrapper for `load_fonts` (normally pub(crate)).
+    /// Loads font dictionaries from a resources object into a TextExtractor.
+    pub fn load_fonts_public(
+        &mut self,
+        resources: &Object,
+        extractor: &mut crate::extractors::TextExtractor,
+    ) -> Result<()> {
+        self.load_fonts(resources, extractor)
     }
 }
 
