@@ -1,6 +1,6 @@
 # PDF Oxide - The Fastest PDF Library for Python and Rust
 
-The fastest Python PDF library for text extraction, image extraction, and markdown conversion. Built on a Rust core for reliability and speed — mean 1.8ms per document, 3.5× faster than leading industry libraries, 100% pass rate on 3,830 real-world PDFs.
+The fastest Python PDF library for text extraction, image extraction, and markdown conversion. Built on a Rust core — 1.0ms mean per document, 5× faster than PyMuPDF, 14× faster than pypdf. 100% pass rate on 3,830 real-world PDFs. MIT licensed.
 
 [![Crates.io](https://img.shields.io/crates/v/pdf_oxide.svg)](https://crates.io/crates/pdf_oxide)
 [![PyPI](https://img.shields.io/pypi/v/pdf_oxide.svg)](https://pypi.org/project/pdf_oxide/)
@@ -42,11 +42,57 @@ pdf_oxide = "0.3"
 
 ## Why pdf_oxide?
 
-- **Fast** — Rust core, mean 1.8ms per document, 3.5× faster than leading industry libraries, 97% under 10ms
-- **Reliable** — 100% pass rate on 3,830 test PDFs, zero panics, zero slow (>5s) PDFs
+- **Fast** — 1.0ms mean per document, 5× faster than PyMuPDF, 14× faster than pypdf, 36× faster than pdfplumber
+- **Reliable** — 100% pass rate on 3,830 test PDFs, zero panics, zero timeouts
 - **Complete** — Text extraction, image extraction, PDF creation, and editing in one library
 - **Dual-language** — First-class Rust API and Python bindings via PyO3
 - **Permissive license** — MIT / Apache-2.0 — use freely in commercial and open-source projects
+
+## Performance
+
+Benchmarked on 3,830 PDFs from three independent public test suites (veraPDF, Mozilla pdf.js, DARPA SafeDocs). 18 libraries tested, single-thread, 60s timeout, no warm-up.
+
+### Python Libraries
+
+| Library | Mean | p99 | Pass Rate | License |
+|---------|------|-----|-----------|---------|
+| **PDF Oxide** | **1.0ms** | **10ms** | **100%** | **MIT** |
+| unstructured | 478.4ms | 1,477ms | 99.6% | Apache-2.0 |
+| PyMuPDF | 6.6ms | 39ms | 99.3% | AGPL-3.0 |
+| pypdfium2 | 5.4ms | 44ms | 99.2% | Apache-2.0 |
+| kreuzberg | 7.2ms | 49ms | 99.1% | MIT |
+| pymupdf4llm | 55.5ms | 280ms | 99.1% | AGPL-3.0 |
+| pdftext | 7.3ms | 82ms | 99.0% | GPL-3.0 |
+| extractous | 112.0ms | 165ms | 98.9% | Apache-2.0 |
+| pdfminer | 16.8ms | 124ms | 98.8% | MIT |
+| pdfplumber | 36.7ms | 201ms | 98.8% | MIT |
+| markitdown | 108.8ms | 378ms | 98.6% | MIT |
+| pypdf | 14.4ms | 99ms | 98.4% | BSD-3 |
+
+### Rust Libraries
+
+| Library | Mean | p99 | Pass Rate | Text Extraction |
+|---------|------|-----|-----------|-----------------|
+| **PDF Oxide** | **1.0ms** | **12ms** | **100%** | **Built-in** |
+| oxidize_pdf | 15.4ms | 33ms | 99.3% | Basic |
+| unpdf | 17.0ms | 11ms | 95.1% | Basic |
+| pdf_extract | 4.08ms | 37ms | 91.5% | Basic |
+| lopdf | 0.86ms | 6ms | 80.2% | No built-in extraction |
+
+### Text Quality
+
+99.5% text parity vs PyMuPDF, pypdfium2, and kreuzberg across the full corpus. PDF Oxide extracts text from 7–10× more "hard" files than it misses vs any competitor.
+
+### Corpus
+
+| Suite | PDFs | Pass Rate |
+|-------|-----:|----------:|
+| veraPDF (PDF/A compliance) | 2,907 | 100% |
+| Mozilla pdf.js | 897 | 99.2% |
+| SafeDocs (targeted edge cases) | 26 | 100% |
+| **Total** | **3,830** | **100%** |
+
+100% pass rate on all valid PDFs — the 7 non-passing files across the corpus are intentionally broken test fixtures (missing PDF header, fuzz-corrupted catalogs, invalid xref streams).
 
 ## Features
 
@@ -107,31 +153,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Performance
-
-Verified against 3,830 PDFs from three independent test suites:
-
-| Corpus | PDFs | Pass Rate |
-|--------|-----:|----------:|
-| veraPDF (PDF/A compliance) | 2,907 | 100% |
-| Mozilla pdf.js | 897 | 99.2% |
-| SafeDocs (targeted edge cases) | 26 | 100% |
-| **Total** | **3,830** | **100%** |
-
-| Metric | Value |
-|--------|-------|
-| **Mean latency** | **1.8ms** |
-| **p50 latency** | 0.6ms |
-| **p90 latency** | 2.6ms |
-| **p99 latency** | 18ms |
-| **Max latency** | 625ms |
-| **Under 10ms** | 98.4% |
-| **Slow (>5s)** | 0 |
-| **Timeouts** | 0 |
-| **Panics** | 0 |
-
-100% pass rate on all valid PDFs — the 7 non-passing files across the corpus are intentionally broken test fixtures (missing PDF header, fuzz-corrupted catalogs, invalid xref streams). v0.3.8 adds a text-only content stream parser that skips graphics operators at the byte level, further reducing parse time on graphics-heavy pages.
-
 ## Installation
 
 ### Python
@@ -169,7 +190,8 @@ maturin develop
 - **[Getting Started (Rust)](docs/getting-started-rust.md)** - Complete Rust guide
 - **[Getting Started (Python)](docs/getting-started-python.md)** - Complete Python guide
 - **[API Docs](https://docs.rs/pdf_oxide)** - Full Rust API reference
-- **[PDF Spec Reference](docs/spec/pdf.md)** - ISO 32000-1:2008
+- **[Full Documentation](https://pdf.oxide.fyi)** - Complete documentation site
+- **[Performance Benchmarks](https://pdf.oxide.fyi/docs/performance)** - Full benchmark methodology and results
 
 ## Use Cases
 
@@ -178,6 +200,7 @@ maturin develop
 - **Data extraction** — Pull structured data from forms, tables, and layouts
 - **Academic research** — Parse papers, extract citations, and process large corpora
 - **PDF generation** — Create invoices, reports, certificates, and templated documents programmatically
+- **PyMuPDF alternative** — MIT licensed, 5× faster, no AGPL restrictions
 
 ## License
 
@@ -204,4 +227,4 @@ cargo build && cargo test && cargo fmt && cargo clippy -- -D warnings
 
 ---
 
-**Rust** + **Python** | MIT/Apache-2.0 | 100% pass rate on 3,830 PDFs | mean 1.8ms/doc | v0.3.8
+**Rust** + **Python** | MIT/Apache-2.0 | 100% pass rate on 3,830 PDFs | 1.0ms mean | 5× faster than PyMuPDF | v0.3.8

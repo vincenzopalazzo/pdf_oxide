@@ -4,12 +4,12 @@ version = "0.3.8"
 edition = "2021"
 authors = ["Yury Fedoseev <yfedoseev@gmail.com>"]
 license = "MIT OR Apache-2.0"
-description = "The Complete PDF Toolkit: extract, create, and edit PDFs. Rust core with bindings for Python, Node, WASM, Go, and more."
+description = "The fastest Rust PDF library with text extraction: 1.0ms mean, 100% pass rate on 3,830 PDFs. 4× faster than pdf_extract, 15× faster than oxidize_pdf. Extract, create, and edit PDFs."
 repository = "https://github.com/yfedoseev/pdf_oxide"
 homepage = "https://github.com/yfedoseev/pdf_oxide"
 documentation = "https://docs.rs/pdf_oxide"
 readme = "README.md"
-keywords = ["pdf", "text-extraction", "pdf-parser", "markdown", "document"]
+keywords = ["pdf", "text-extraction", "pdf-parser", "pdf-to-markdown", "pdf-library"]
 categories = ["parsing", "text-processing", "multimedia::images"]
 
 [lib]

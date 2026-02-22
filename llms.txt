@@ -2,8 +2,9 @@
 
 > The fastest PDF library for Python and Rust.
 > Text extraction, image extraction, PDF creation, editing, and markdown conversion.
-> Mean 2.1ms per document. 100% pass rate on 3,830 real-world PDFs.
-> MIT / Apache-2.0 license. Current version: 0.3.6.
+> 1.0ms mean per document. 100% pass rate on 3,830 real-world PDFs.
+> 5× faster than PyMuPDF, 14× faster than pypdf.
+> MIT / Apache-2.0 license. Current version: 0.3.8.
 
 - Python: `pip install pdf-oxide`
 - Rust: `cargo add pdf_oxide`
@@ -20,6 +21,14 @@
 - [Rust API (docs.rs)](https://docs.rs/pdf_oxide): Complete Rust API reference with all public types and methods
 - [README](https://raw.githubusercontent.com/yfedoseev/pdf_oxide/main/README.md): Project overview, installation, quick start examples
 - [Changelog](https://raw.githubusercontent.com/yfedoseev/pdf_oxide/main/CHANGELOG.md): Version history and release notes
+
+## Performance (v0.3.8)
+
+Benchmarked on 3,830 PDFs (veraPDF, Mozilla pdf.js, DARPA SafeDocs). 18 libraries tested.
+
+Python: pdf_oxide 1.0ms, pypdfium2 5.4ms, PyMuPDF 6.6ms, kreuzberg 7.2ms, pdftext 7.3ms, pypdf 14.4ms, pdfminer 16.8ms, pdfplumber 36.7ms, pymupdf4llm 55.5ms, markitdown 108.8ms, extractous 112.0ms, unstructured 478.4ms.
+Rust: pdf_oxide 1.0ms (100% pass), lopdf 0.86ms (80% pass, no text extraction), pdf_extract 4.08ms (91.5%), oxidize_pdf 15.4ms (99.3%), unpdf 17.0ms (95.1%).
+Text quality: 99.5% parity vs PyMuPDF/pypdfium2/kreuzberg.
 
 ## Guides
 

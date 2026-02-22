@@ -11,7 +11,7 @@ High-performance PDF parsing for Python with PDF specification compliance.
 - **Complex Scripts**: RTL (Arabic/Hebrew), CJK (Japanese/Korean/Chinese), Devanagari, Thai
 - **OCR Support**: Optional DBNet++/SVTR for scanned PDFs
 - **Format Conversion**: Markdown, HTML, PlainText
-- **Performance**: 47.9× faster than PyMuPDF4LLM
+- **Performance**: 1.0ms mean — 5× faster than PyMuPDF, 14× faster than pypdf, 100% pass rate on 3,830 PDFs
 
 ## Quick Start
 

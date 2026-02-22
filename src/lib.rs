@@ -17,42 +17,75 @@
 
 //! # PDF Oxide
 //!
-//! Production-grade PDF toolkit in Rust: 47.9× faster than PyMuPDF4LLM with PDF spec compliance.
+//! The fastest PDF library for Python and Rust. 1.0ms mean text extraction — 5× faster than
+//! PyMuPDF, 14× faster than pypdf, 36× faster than pdfplumber. 100% pass rate on 3,830
+//! real-world PDFs. MIT licensed. A drop-in PyMuPDF alternative with no AGPL restrictions.
+//!
+//! ## Performance (v0.3.8)
+//!
+//! Benchmarked against 18 libraries on 3,830 PDFs from 3 public test suites
+//! (veraPDF, Mozilla pdf.js, DARPA SafeDocs). Single-thread, 60s timeout, no warm-up.
+//!
+//! ### Python PDF Libraries
+//!
+//! | Library | Mean | Pass Rate | License |
+//! |---------|------|-----------|---------|
+//! | **pdf_oxide** | **1.0ms** | **100%** | **MIT** |
+//! | unstructured | 478.4ms | 99.6% | Apache-2.0 |
+//! | PyMuPDF | 6.6ms | 99.3% | AGPL-3.0 |
+//! | pypdfium2 | 5.4ms | 99.2% | Apache-2.0 |
+//! | kreuzberg | 7.2ms | 99.1% | MIT |
+//! | pymupdf4llm | 55.5ms | 99.1% | AGPL-3.0 |
+//! | pdftext | 7.3ms | 99.0% | GPL-3.0 |
+//! | extractous | 112.0ms | 98.9% | Apache-2.0 |
+//! | pdfminer | 16.8ms | 98.8% | MIT |
+//! | pdfplumber | 36.7ms | 98.8% | MIT |
+//! | markitdown | 108.8ms | 98.6% | MIT |
+//! | pypdf | 14.4ms | 98.4% | BSD-3 |
+//!
+//! ### Rust PDF Libraries
+//!
+//! | Library | Mean | Pass Rate | Text Extraction |
+//! |---------|------|-----------|-----------------|
+//! | **pdf_oxide** | **1.0ms** | **100%** | **Built-in** |
+//! | oxidize_pdf | 15.4ms | 99.3% | Basic |
+//! | unpdf | 17.0ms | 95.1% | Basic |
+//! | pdf_extract | 4.08ms | 91.5% | Basic |
+//! | lopdf | 0.86ms | 80.2% | No built-in extraction |
+//!
+//! 99.5% text quality parity vs PyMuPDF, pypdfium2, and kreuzberg across the full corpus.
+//! Full benchmark details: <https://pdf.oxide.fyi/docs/performance>
 //!
 //! ## Core Features
 //!
 //! ### Reading & Extraction
-//! - **PDF Spec Compliance**: ISO 32000-1:2008 sections 9, 14.7-14.8
-//! - **Text Extraction**: 5-level character-to-Unicode priority (§9.10.2)
+//! - **Text Extraction**: Character, span, and page-level with font metadata and bounding boxes
 //! - **Reading Order**: 4 pluggable strategies (XY-Cut, Structure Tree, Geometric, Simple)
-//! - **Font Support**: 70-80% character recovery with CID-to-GID mapping
-//! - **OCR Support**: DBNet++ detection + SVTR recognition with smart auto-detection
 //! - **Complex Scripts**: RTL (Arabic/Hebrew), CJK (Japanese/Korean/Chinese), Devanagari, Thai
-//! - **Format Conversion**: Markdown, HTML, PlainText, TOC
+//! - **Format Conversion**: PDF → Markdown, HTML, PlainText
+//! - **Image Extraction**: Content streams, Form XObjects, inline images
+//! - **Forms & Annotations**: Read/write form fields, all annotation types, bookmarks
+//! - **Text Search**: Regex and case-insensitive search with page-level results
 //!
-//! ### Writing & Creation (v0.3.0)
+//! ### Writing & Creation
 //! - **PDF Generation**: Fluent DocumentBuilder API for programmatic PDF creation
-//! - **Format Conversion**: Markdown → PDF, HTML → PDF, Plain Text → PDF
+//! - **Format Conversion**: Markdown → PDF, HTML → PDF, Plain Text → PDF, Image → PDF
 //! - **Advanced Graphics**: Path operations, image embedding, table generation
 //! - **Font Embedding**: Automatic font subsetting for compact output
 //! - **Interactive Forms**: Fillable forms with text fields, checkboxes, radio buttons, dropdowns
+//! - **QR Codes & Barcodes**: Code128, EAN-13, UPC-A (feature flag: `barcodes`)
 //!
-//! ### Editing (v0.3.0)
+//! ### Editing
 //! - **DOM-like API**: Query and modify PDF content with strongly-typed wrappers
 //! - **Element Modification**: Find and replace text, modify images, paths, tables
-//! - **Page Operations**: Add, remove, reorder, merge pages
-//! - **Metadata Editing**: Title, author, subject, keywords
+//! - **Page Operations**: Add, remove, reorder, merge, rotate, crop pages
+//! - **Encryption**: AES-256, password protection
 //! - **Incremental Saves**: Efficient appending without full rewrite
 //!
-//! ## Architecture
-//! - **Pluggable Design**: Trait-based extensibility for strategies and converters
-//! - **Python Bindings**: Full API via PyO3
-//! - **Symmetric Read/Write**: Unified ContentElement model for extraction and generation
-//!
-//! ## Planned for v0.4.0+
-//!
-//! - **Digital Signatures**: Full signing and verification (foundation in v0.3.0)
-//! - **Advanced**: Figures, citations, annotations, accessibility (v0.5.0+)
+//! ### Compliance
+//! - **PDF/A**: Validation and conversion
+//! - **PDF/UA**: Accessibility checks
+//! - **PDF/X**: Print production validation
 //!
 //! ## Quick Start - Rust
 //!
