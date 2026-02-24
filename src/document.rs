@@ -5740,7 +5740,7 @@ impl PdfDocument {
         &mut self,
         page_index: usize,
     ) -> Result<Vec<crate::extractors::PdfImage>> {
-        use crate::content::parse_content_stream;
+        use crate::content::parse_content_stream_images_only;
         use crate::content::Operator;
 
         // Get page object and resources
@@ -5765,8 +5765,8 @@ impl PdfDocument {
             None => None,
         };
 
-        // Parse content stream and extract images
-        let operators = match parse_content_stream(&content_data) {
+        // Parse content stream with image-only fast path (skips BT/ET text blocks)
+        let operators = match parse_content_stream_images_only(&content_data) {
             Ok(ops) => ops,
             Err(_) => {
                 // If content stream parsing fails, return empty

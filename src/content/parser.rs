@@ -228,6 +228,141 @@ pub fn parse_content_stream_text_only(data: &[u8]) -> Result<Vec<Operator>> {
     Ok(operators)
 }
 
+/// Image-only content stream parser: skips BT/ET text blocks entirely.
+///
+/// Only fully parses operators relevant to image extraction:
+/// `cm`, `q`, `Q`, `Do`, `BI`/`ID`/`EI` (inline images).
+/// All text and graphics drawing operators are skipped.
+pub fn parse_content_stream_images_only(data: &[u8]) -> Result<Vec<Operator>> {
+    let mut operators = Vec::with_capacity(256);
+    let mut input = data;
+    let mut consecutive_errors: usize = 0;
+    let mut inside_text = false;
+
+    while !input.is_empty() {
+        if let Ok((rest, _)) = multispace0::<&[u8], nom::error::Error<&[u8]>>.parse(input) {
+            input = rest;
+        }
+        if input.is_empty() {
+            break;
+        }
+
+        if operators.len() >= MAX_OPERATORS {
+            break;
+        }
+
+        if inside_text {
+            // Inside BT/ET: skip everything until ET
+            match scan_to_et(input) {
+                Some(rest) => {
+                    input = rest;
+                    inside_text = false;
+                    consecutive_errors = 0;
+                },
+                None => break, // No ET found, end of stream
+            }
+        } else {
+            // Outside BT/ET: use scan_graphics_region but handle differently
+            match scan_graphics_region(input, &mut consecutive_errors) {
+                ScanResult::EndOfData => break,
+                ScanResult::FoundBT { rest } => {
+                    // Skip the text block instead of parsing it
+                    input = rest;
+                    inside_text = true;
+                },
+                ScanResult::InlineImage { rest } => match parse_inline_image(rest) {
+                    Ok((rest2, op)) => {
+                        operators.push(op);
+                        input = rest2;
+                    },
+                    Err(_) => input = rest,
+                },
+                ScanResult::NeedFullParse {
+                    operand_start,
+                    after_op,
+                } => match parse_operator_with_operands(operand_start) {
+                    Ok((rest2, op)) => {
+                        operators.push(op);
+                        input = rest2;
+                    },
+                    Err(_) => input = after_op,
+                },
+                ScanResult::DeferredThenText {
+                    deferred_start,
+                    trigger_start,
+                } => {
+                    let mut remaining = deferred_start;
+                    while remaining.len() > trigger_start.len() {
+                        match parse_operator_with_operands(remaining) {
+                            Ok((rest2, op)) => {
+                                operators.push(op);
+                                remaining = rest2;
+                            },
+                            Err(_) => {
+                                if remaining.len() > 1 {
+                                    remaining = &remaining[1..];
+                                } else {
+                                    break;
+                                }
+                            },
+                        }
+                    }
+                    input = trigger_start;
+                    consecutive_errors = 0;
+                },
+                ScanResult::TooManyErrors { .. } => break,
+            }
+        }
+    }
+
+    Ok(operators)
+}
+
+/// Skip forward until we find the ET operator (end text).
+/// Returns the remaining input after ET, or None if not found.
+fn scan_to_et(data: &[u8]) -> Option<&[u8]> {
+    let mut i = 0;
+    while i + 1 < data.len() {
+        if data[i] == b'E' && data[i + 1] == b'T' {
+            // Verify it's a real ET operator (not part of a string)
+            let before_ok = i == 0 || data[i - 1].is_ascii_whitespace()
+                || data[i - 1] == b')' || data[i - 1] == b'>';
+            let after_ok = i + 2 >= data.len() || data[i + 2].is_ascii_whitespace()
+                || data[i + 2] == b'%';
+            if before_ok && after_ok {
+                return Some(&data[i + 2..]);
+            }
+        }
+        // Skip strings to avoid false matches inside text
+        if data[i] == b'(' {
+            i += 1;
+            let mut depth = 1;
+            while i < data.len() && depth > 0 {
+                match data[i] {
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    b'\\' => i += 1, // skip escaped char
+                    _ => {},
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if data[i] == b'<' && (i + 1 >= data.len() || data[i + 1] != b'<') {
+            i += 1;
+            while i < data.len() && data[i] != b'>' {
+                i += 1;
+            }
+            if i < data.len() {
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Parse a single operator with its operands.
 ///
 /// Returns the remaining input and the parsed operator.
