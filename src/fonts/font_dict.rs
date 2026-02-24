@@ -3369,10 +3369,9 @@ fn standard_encoding_lookup(encoding: &str, code: u8) -> Option<String> {
             if (32..=126).contains(&code) {
                 Some((code as char).to_string())
             } else {
-                // MacRoman extended characters
-                // Partial implementation focusing on common punctuation
-                // PDF Spec: ISO 32000-1:2008, Annex D.2
+                // Complete Mac OS Roman encoding per PDF Spec ISO 32000-1:2008, Annex D, Table D.2
                 let unicode = match code {
+                    // 0x80-0x9F: Accented letters
                     0x80 => '\u{00C4}', // Adieresis
                     0x81 => '\u{00C5}', // Aring
                     0x82 => '\u{00C7}', // Ccedilla
@@ -3405,15 +3404,107 @@ fn standard_encoding_lookup(encoding: &str, code: u8) -> Option<String> {
                     0x9D => '\u{00F9}', // ugrave
                     0x9E => '\u{00FB}', // ucircumflex
                     0x9F => '\u{00FC}', // udieresis
-                    0xD0 => '\u{2013}', // EN DASH (this is the key fix!)
-                    0xD1 => '\u{2014}', // EM DASH
-                    0xD2 => '\u{201C}', // LEFT DOUBLE QUOTATION MARK
-                    0xD3 => '\u{201D}', // RIGHT DOUBLE QUOTATION MARK
-                    0xD4 => '\u{2018}', // LEFT SINGLE QUOTATION MARK
-                    0xD5 => '\u{2019}', // RIGHT SINGLE QUOTATION MARK
-                    0xE0 => '\u{2020}', // dagger
-                    0xE1 => '\u{00B0}', // degree
-                    _ if code >= 0xA0 => char::from_u32(code as u32)?,
+                    // 0xA0-0xBF: Symbols and punctuation (NOT Latin-1!)
+                    0xA0 => '\u{2020}', // dagger (NOT NBSP)
+                    0xA1 => '\u{00B0}', // degree (NOT inverted exclamation)
+                    0xA2 => '\u{00A2}', // cent
+                    0xA3 => '\u{00A3}', // sterling
+                    0xA4 => '\u{00A7}', // section (NOT currency sign)
+                    0xA5 => '\u{2022}', // bullet (NOT yen)
+                    0xA6 => '\u{00B6}', // paragraph (NOT broken bar)
+                    0xA7 => '\u{00DF}', // germandbls (NOT section)
+                    0xA8 => '\u{00AE}', // registered (NOT dieresis)
+                    0xA9 => '\u{00A9}', // copyright
+                    0xAA => '\u{2122}', // trademark (NOT ordfeminine)
+                    0xAB => '\u{00B4}', // acute (NOT guillemotleft)
+                    0xAC => '\u{00A8}', // dieresis (NOT logical not)
+                    0xAD => '\u{2260}', // notequal (NOT soft hyphen)
+                    0xAE => '\u{00C6}', // AE (NOT registered)
+                    0xAF => '\u{00D8}', // Oslash (NOT macron)
+                    0xB0 => '\u{221E}', // infinity (NOT degree)
+                    0xB1 => '\u{00B1}', // plusminus
+                    0xB2 => '\u{2264}', // lessequal (NOT superscript 2)
+                    0xB3 => '\u{2265}', // greaterequal (NOT superscript 3)
+                    0xB4 => '\u{00A5}', // yen (NOT acute)
+                    0xB5 => '\u{00B5}', // mu
+                    0xB6 => '\u{2202}', // partialdiff (NOT paragraph)
+                    0xB7 => '\u{2211}', // summation (NOT middle dot)
+                    0xB8 => '\u{220F}', // product (NOT cedilla)
+                    0xB9 => '\u{03C0}', // pi (NOT superscript 1)
+                    0xBA => '\u{222B}', // integral (NOT ordmasculine)
+                    0xBB => '\u{00AA}', // ordfeminine (NOT guillemotright)
+                    0xBC => '\u{00BA}', // ordmasculine (NOT one quarter)
+                    0xBD => '\u{2126}', // Omega (NOT one half)
+                    0xBE => '\u{00E6}', // ae (NOT three quarters)
+                    0xBF => '\u{00F8}', // oslash (NOT inverted question)
+                    // 0xC0-0xCF: More symbols and accented capitals
+                    0xC0 => '\u{00BF}', // questiondown
+                    0xC1 => '\u{00A1}', // exclamdown
+                    0xC2 => '\u{00AC}', // logicalnot
+                    0xC3 => '\u{221A}', // radical
+                    0xC4 => '\u{0192}', // florin
+                    0xC5 => '\u{2248}', // approxequal
+                    0xC6 => '\u{2206}', // Delta
+                    0xC7 => '\u{00AB}', // guillemotleft
+                    0xC8 => '\u{00BB}', // guillemotright
+                    0xC9 => '\u{2026}', // ellipsis
+                    0xCA => '\u{00A0}', // nonbreakingspace
+                    0xCB => '\u{00C0}', // Agrave
+                    0xCC => '\u{00C3}', // Atilde
+                    0xCD => '\u{00D5}', // Otilde
+                    0xCE => '\u{0152}', // OE
+                    0xCF => '\u{0153}', // oe
+                    // 0xD0-0xDF: Dashes, quotes, ligatures
+                    0xD0 => '\u{2013}', // endash
+                    0xD1 => '\u{2014}', // emdash
+                    0xD2 => '\u{201C}', // quotedblleft
+                    0xD3 => '\u{201D}', // quotedblright
+                    0xD4 => '\u{2018}', // quoteleft
+                    0xD5 => '\u{2019}', // quoteright
+                    0xD6 => '\u{00F7}', // divide
+                    0xD7 => '\u{25CA}', // lozenge
+                    0xD8 => '\u{00FF}', // ydieresis
+                    0xD9 => '\u{0178}', // Ydieresis
+                    0xDA => '\u{2044}', // fraction
+                    0xDB => '\u{20AC}', // Euro
+                    0xDC => '\u{2039}', // guilsinglleft
+                    0xDD => '\u{203A}', // guilsinglright
+                    0xDE => '\u{FB01}', // fi ligature
+                    0xDF => '\u{FB02}', // fl ligature
+                    // 0xE0-0xEF: More symbols and accented capitals
+                    0xE0 => '\u{2021}', // daggerdbl
+                    0xE1 => '\u{00B7}', // periodcentered
+                    0xE2 => '\u{201A}', // quotesinglbase
+                    0xE3 => '\u{201E}', // quotedblbase
+                    0xE4 => '\u{2030}', // perthousand
+                    0xE5 => '\u{00C2}', // Acircumflex
+                    0xE6 => '\u{00CA}', // Ecircumflex
+                    0xE7 => '\u{00C1}', // Aacute
+                    0xE8 => '\u{00CB}', // Edieresis
+                    0xE9 => '\u{00C8}', // Egrave
+                    0xEA => '\u{00CD}', // Iacute
+                    0xEB => '\u{00CE}', // Icircumflex
+                    0xEC => '\u{00CF}', // Idieresis
+                    0xED => '\u{00CC}', // Igrave
+                    0xEE => '\u{00D3}', // Oacute
+                    0xEF => '\u{00D4}', // Ocircumflex
+                    // 0xF0-0xFF: More accented and special chars
+                    0xF0 => '\u{F8FF}', // Apple logo (private use area)
+                    0xF1 => '\u{00D2}', // Ograve
+                    0xF2 => '\u{00DA}', // Uacute
+                    0xF3 => '\u{00DB}', // Ucircumflex
+                    0xF4 => '\u{00D9}', // Ugrave
+                    0xF5 => '\u{0131}', // dotlessi
+                    0xF6 => '\u{02C6}', // circumflex
+                    0xF7 => '\u{02DC}', // tilde
+                    0xF8 => '\u{00AF}', // macron
+                    0xF9 => '\u{02D8}', // breve
+                    0xFA => '\u{02D9}', // dotaccent
+                    0xFB => '\u{02DA}', // ring
+                    0xFC => '\u{00B8}', // cedilla
+                    0xFD => '\u{02DD}', // hungarumlaut
+                    0xFE => '\u{02DB}', // ogonek
+                    0xFF => '\u{02C7}', // caron
                     _ => return None,
                 };
                 Some(unicode.to_string())
