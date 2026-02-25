@@ -18,7 +18,7 @@ crate-type = ["cdylib", "rlib"]  # cdylib for Python/WASM, rlib for Rust
 
 [dependencies]
 # Core dependencies
-thiserror = "1.0"
+thiserror = "2.0"
 log = "0.4"
 env_logger = "0.11"
 chrono = "0.4"  # Timestamp generation for benchmark results
@@ -40,10 +40,10 @@ flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 weezl = "0.1"  # LZW compression
 inflate = "0.4"  # Alternative inflate for better error recovery
 libflate = "2.1"  # Another inflate implementation for error recovery
-brotli = "7"  # Brotli compression (PDF 2.0, ISO 32000-2:2020)
+brotli = "8"  # Brotli compression (PDF 2.0, ISO 32000-2:2020)
 
 # Font parsing
-ttf-parser = "0.24"  # TrueType font parser for embedded font cmap tables
+ttf-parser = "0.25"  # TrueType font parser for embedded font cmap tables
 phf = { version = "0.13", features = ["macros"] }  # Perfect hash maps for Adobe Glyph List
 encoding_rs = "0.8"  # Shift-JIS, EUC-JP, and other CJK encodings for predefined CMaps
 
@@ -77,7 +77,7 @@ linfa = { version = "0.7", optional = true }
 linfa-clustering = { version = "0.8", optional = true }
 
 # ML (CPU-only)
-tract-onnx = { version = "0.21", optional = true }
+tract-onnx = { version = "0.22", optional = true }
 tokenizers = { version = "0.15", optional = true, default-features = false, features = ["onig"] }
 
 # OCR - PaddleOCR via ONNX Runtime (optional)
@@ -108,7 +108,7 @@ pdfium-render = { version = "0.8", optional = true }
 # Rendering (optional - for page to image conversion)
 tiny-skia = { version = "0.11", optional = true }
 fontdb = { version = "0.23", optional = true }
-rustybuzz = { version = "0.14", optional = true }
+rustybuzz = { version = "0.20", optional = true }
 
 lzw = "0.10.0"
 uuid = { version = "1.0", features = ["v4"] }

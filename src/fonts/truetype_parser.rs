@@ -154,7 +154,7 @@ impl<'a> TrueTypeFont<'a> {
 
     /// Get the italic angle.
     pub fn italic_angle(&self) -> f32 {
-        self.face.italic_angle().unwrap_or(0.0)
+        self.face.italic_angle()
     }
 
     /// Check if the font is bold.
