@@ -362,10 +362,92 @@ impl TextPostProcessor {
         result
     }
 
+    /// Normalize leader dots in TOC-style lines.
+    ///
+    /// Collapses long runs of dots (or dot-like characters) into a short leader
+    /// sequence ("...") to produce cleaner text output. This handles common TOC
+    /// formatting where sections are connected to page numbers by dot leaders:
+    ///
+    /// Input:  "Section 1 ..................... 5"
+    /// Output: "Section 1 ... 5"
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pdf_oxide::converters::text_post_processor::TextPostProcessor;
+    ///
+    /// let input = "Introduction .................. 5";
+    /// let output = TextPostProcessor::normalize_leader_dots(input);
+    /// assert_eq!(output, "Introduction ... 5");
+    /// ```
+    pub fn normalize_leader_dots(text: &str) -> String {
+        let mut result = String::with_capacity(text.len());
+
+        for (line_idx, line) in text.lines().enumerate() {
+            if line_idx > 0 {
+                result.push('\n');
+            }
+
+            let chars: Vec<char> = line.chars().collect();
+            let len = chars.len();
+            let mut i = 0;
+
+            while i < len {
+                if Self::is_leader_dot(chars[i]) {
+                    let run_start = i;
+                    while i < len && Self::is_leader_dot(chars[i]) {
+                        i += 1;
+                    }
+                    let run_len = i - run_start;
+
+                    if run_len >= 4 {
+                        if !result.ends_with(' ') {
+                            result.push(' ');
+                        }
+                        result.push_str("...");
+
+                        while i < len && chars[i] == ' ' {
+                            i += 1;
+                        }
+
+                        if i < len {
+                            result.push(' ');
+                        }
+                    } else {
+                        for c in &chars[run_start..i] {
+                            result.push(*c);
+                        }
+                    }
+                } else {
+                    result.push(chars[i]);
+                    i += 1;
+                }
+            }
+        }
+
+        if text.ends_with('\n') && !result.ends_with('\n') {
+            result.push('\n');
+        }
+
+        result
+    }
+
+    /// Check if a character is a dot-like leader character.
+    pub fn is_leader_dot(ch: char) -> bool {
+        matches!(
+            ch,
+            '.'    // U+002E FULL STOP
+            | '·'  // U+00B7 MIDDLE DOT
+            | '․'  // U+2024 ONE DOT LEADER
+            | '‥'  // U+2025 TWO DOT LEADER
+            | '…'  // U+2026 HORIZONTAL ELLIPSIS
+        )
+    }
+
     /// Apply full text post-processing pipeline.
     ///
     /// Applies ligature repair, hyphenation removal, whitespace normalization,
-    /// and special character spacing in sequence.
+    /// leader dot normalization, and special character spacing in sequence.
     ///
     /// # Arguments
     ///
@@ -378,7 +460,8 @@ impl TextPostProcessor {
         let ligatures_fixed = Self::repair_ligatures(text);
         let hyphenated_fixed = Self::rejoin_hyphenated_words(&ligatures_fixed);
         let whitespace_normalized = Self::normalize_whitespace(&hyphenated_fixed);
-        Self::ensure_special_char_spacing(&whitespace_normalized)
+        let leaders_normalized = Self::normalize_leader_dots(&whitespace_normalized);
+        Self::ensure_special_char_spacing(&leaders_normalized)
     }
 }
 
@@ -707,5 +790,75 @@ mod tests {
         assert!(TextPostProcessor::is_space_after_special(','));
         assert!(TextPostProcessor::is_space_after_special('.'));
         assert!(TextPostProcessor::is_space_after_special(')'));
+    }
+
+    // ===== Tests for Leader Dot Normalization (Issue #104) =====
+
+    #[test]
+    fn test_normalize_leader_dots_basic() {
+        assert_eq!(
+            TextPostProcessor::normalize_leader_dots("Introduction .................. 5"),
+            "Introduction ... 5"
+        );
+    }
+
+    #[test]
+    fn test_normalize_leader_dots_multiple_lines() {
+        let input = "Chapter 1.......10\nChapter 2.......25\nChapter 3.......40";
+        let output = TextPostProcessor::normalize_leader_dots(input);
+        assert_eq!(output, "Chapter 1 ... 10\nChapter 2 ... 25\nChapter 3 ... 40");
+    }
+
+    #[test]
+    fn test_normalize_leader_dots_short_preserved() {
+        assert_eq!(
+            TextPostProcessor::normalize_leader_dots("e.g. this is normal"),
+            "e.g. this is normal"
+        );
+        assert_eq!(
+            TextPostProcessor::normalize_leader_dots("wait for it..."),
+            "wait for it..."
+        );
+    }
+
+    #[test]
+    fn test_normalize_leader_dots_unicode() {
+        assert_eq!(
+            TextPostProcessor::normalize_leader_dots("Section 1 ···················· 5"),
+            "Section 1 ... 5"
+        );
+        assert_eq!(
+            TextPostProcessor::normalize_leader_dots("Section 1 ․․․․․․․․ 5"),
+            "Section 1 ... 5"
+        );
+    }
+
+    #[test]
+    fn test_normalize_leader_dots_empty() {
+        assert_eq!(TextPostProcessor::normalize_leader_dots(""), "");
+    }
+
+    #[test]
+    fn test_normalize_leader_dots_no_trailing_content() {
+        assert_eq!(
+            TextPostProcessor::normalize_leader_dots("Section 1 ............"),
+            "Section 1 ..."
+        );
+    }
+
+    #[test]
+    fn test_normalize_leader_dots_preserves_version_numbers() {
+        assert_eq!(
+            TextPostProcessor::normalize_leader_dots("Version 1.2.3 is released"),
+            "Version 1.2.3 is released"
+        );
+    }
+
+    #[test]
+    fn test_process_pipeline_includes_leader_dots() {
+        let input = "Chapter 1 .................. 5";
+        let output = TextPostProcessor::process(input);
+        assert!(output.contains("..."));
+        assert!(!output.contains(".................."));
     }
 }
