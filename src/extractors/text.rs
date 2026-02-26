@@ -2396,7 +2396,7 @@ impl TextExtractor {
                         "Sharing TrueType cmap from donor font to '{}' (Identity-H, no embedded font)",
                         font_arc.base_font
                     );
-                    // Use Arc::make_mut for copy-on-write: only clones if other Arcs exist
+                    // Use Arc::make_mut + set_truetype_cmap for copy-on-write sharing
                     Arc::make_mut(font_arc).set_truetype_cmap(Some(donor_cmap.clone()));
                     break;
                 }
@@ -4369,6 +4369,15 @@ impl TextExtractor {
             return Ok(());
         }
 
+        // Span result cache: reuse extracted spans from self-contained Form XObjects.
+        // Only works for XObjects with own /Resources (font context is self-contained).
+        if let Some(cached_spans) = doc.xobject_spans_cache.get(&xobject_ref) {
+            if let Some(spans) = cached_spans {
+                self.spans.extend(spans.iter().cloned());
+            }
+            return Ok(());
+        }
+
         // Load the XObject (now known to be Form or unknown — worth the full load)
         let xobject = doc.load_object(xobject_ref)?;
 
@@ -4421,18 +4430,30 @@ impl TextExtractor {
                     // page has any active fonts; if not, skip.
                 }
 
-                // Decode the stream (after resource pre-check)
+                // Decode the stream — check cache first to avoid repeated FlateDecode.
                 self.xobject_decode_count += 1;
-                let stream_data = match doc.decode_stream_with_encryption(&xobject, xobject_ref) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        log::warn!(
-                            "Failed to decode Form XObject '{}' stream: {}, skipping",
-                            name,
-                            e
-                        );
-                        return Ok(());
-                    },
+                let stream_data = if let Some(cached) = doc.xobject_stream_cache.get(&xobject_ref) {
+                    cached.as_ref().clone()
+                } else {
+                    match doc.decode_stream_with_encryption(&xobject, xobject_ref) {
+                        Ok(data) => {
+                            // Cache if under 50MB total
+                            const MAX_STREAM_CACHE_BYTES: usize = 50 * 1024 * 1024;
+                            if doc.xobject_stream_cache_bytes + data.len() <= MAX_STREAM_CACHE_BYTES {
+                                doc.xobject_stream_cache_bytes += data.len();
+                                doc.xobject_stream_cache.insert(xobject_ref, std::sync::Arc::new(data.clone()));
+                            }
+                            data
+                        },
+                        Err(e) => {
+                            log::warn!(
+                                "Failed to decode Form XObject '{}' stream: {}, skipping",
+                                name,
+                                e
+                            );
+                            return Ok(());
+                        },
+                    }
                 };
 
                 // Quick scan: skip XObjects that contain no text operators (BT) and
@@ -4489,6 +4510,9 @@ impl TextExtractor {
                     saved_xobj_cache = None;
                 }
 
+                // Track span count for result caching
+                let spans_before = self.spans.len();
+
                 // Streaming parse+execute: avoids allocating Vec<Operator>
                 self.xobject_depth += 1;
                 let parse_result =
@@ -4500,6 +4524,17 @@ impl TextExtractor {
                         name,
                         e
                     );
+                }
+
+                // Cache span results for self-contained Form XObjects.
+                // Only safe when XObject has own /Resources (font context is independent of page).
+                if has_own_resources {
+                    let new_spans = if self.spans.len() > spans_before {
+                        Some(self.spans[spans_before..].to_vec())
+                    } else {
+                        None
+                    };
+                    doc.xobject_spans_cache.insert(xobject_ref, new_spans);
                 }
 
                 // Restore fonts, resources, and XObject cache only if saved

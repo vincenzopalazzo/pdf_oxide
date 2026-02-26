@@ -172,6 +172,13 @@ pub struct PdfDocument {
     /// shared graphics-only XObjects (watermarks, logos, chart elements) are
     /// decompressed and scanned at most once across the entire document.
     pub(crate) xobject_text_free_cache: HashSet<ObjectRef>,
+    /// Cache of decompressed Form XObject streams. Bounded at 50MB total.
+    /// Avoids repeated FlateDecode decompression of shared Form XObjects.
+    pub(crate) xobject_stream_cache: HashMap<ObjectRef, std::sync::Arc<Vec<u8>>>,
+    pub(crate) xobject_stream_cache_bytes: usize,
+    /// Cache of extracted TextSpan results from self-contained Form XObjects
+    /// (those with own /Resources/Font). None = processed but no spans.
+    pub(crate) xobject_spans_cache: HashMap<ObjectRef, Option<Vec<crate::layout::TextSpan>>>,
 }
 
 impl std::fmt::Debug for PdfDocument {
@@ -318,6 +325,9 @@ impl PdfDocument {
             scanned_object_offsets: None,
             image_xobject_cache: HashSet::new(),
             xobject_text_free_cache: HashSet::new(),
+            xobject_stream_cache: HashMap::new(),
+            xobject_stream_cache_bytes: 0,
+            xobject_spans_cache: HashMap::new(),
         };
 
         // Initialize encryption immediately
@@ -1966,6 +1976,7 @@ impl PdfDocument {
     /// Collects all unique XObject references, sorts them by xref offset for sequential
     /// I/O (avoids random seeking in large files), then peeks each one via `is_form_xobject()`.
     fn prefetch_xobject_subtypes(&mut self) {
+        // Collect all unique XObject refs from all cached pages
         let mut xobj_refs: Vec<ObjectRef> = Vec::new();
         let page_dicts: Vec<Object> = self.page_cache.values().cloned().collect();
 
@@ -2015,6 +2026,7 @@ impl PdfDocument {
             }
         }
 
+        // Deduplicate
         xobj_refs.sort_unstable_by_key(|r| (r.id, r.gen));
         xobj_refs.dedup();
 
@@ -2031,6 +2043,7 @@ impl PdfDocument {
             xobj_refs.len()
         );
 
+        // Peek each ref — populates image_xobject_cache as a side effect
         for obj_ref in xobj_refs {
             self.is_form_xobject(obj_ref);
         }
