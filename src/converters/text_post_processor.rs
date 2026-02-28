@@ -343,11 +343,13 @@ impl TextPostProcessor {
             };
 
             if let Some(lig) = replacement {
-                // Only replace if surrounded by letters (not at word boundaries)
-                let prev_is_letter = i > 0 && chars[i - 1].is_alphabetic();
-                let next_is_letter = i + 1 < len && chars[i + 1].is_alphabetic();
+                // Only replace if surrounded by lowercase letters — this avoids
+                // false positives on "C#", "$var", "100%", etc. Broken ligatures
+                // from LaTeX PDFs always appear mid-word between lowercase chars.
+                let prev_is_lower = i > 0 && chars[i - 1].is_lowercase();
+                let next_is_lower = i + 1 < len && chars[i + 1].is_lowercase();
 
-                if prev_is_letter && next_is_letter {
+                if prev_is_lower && next_is_lower {
                     result.push_str(lig);
                 } else {
                     result.push(ch);
