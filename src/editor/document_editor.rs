@@ -1024,6 +1024,11 @@ impl DocumentEditor {
         // Start incremental update section
         let update_start = original_len as u64;
 
+        // Sync form field changes into modified_objects before writing
+        if self.acroform_modified {
+            self.flush_form_fields_to_modified_objects()?;
+        }
+
         // Track new xref entries
         let mut xref_entries: Vec<(u32, u64, u16)> = Vec::new();
         let serializer = ObjectSerializer::compact();
@@ -1090,11 +1095,121 @@ impl DocumentEditor {
         Ok(())
     }
 
+    /// Sync modified form fields into `modified_objects` for incremental save.
+    ///
+    /// For each modified field wrapper, loads the original PDF annotation object,
+    /// updates its `/V` entry (and `/AS` for checkboxes/radios), and inserts the
+    /// updated object into `modified_objects`. Also sets `/NeedAppearances true`
+    /// in the AcroForm dictionary so PDF readers regenerate appearance streams.
+    fn flush_form_fields_to_modified_objects(&mut self) -> Result<()> {
+        use crate::extractors::forms::FieldType;
+
+        // Collect field data we need before mutating self
+        let fields_to_flush: Vec<(u32, u16, Object, bool)> = {
+            let mut result = Vec::new();
+            for wrapper in self.modified_form_fields.values() {
+                if !wrapper.is_modified() || wrapper.is_new() {
+                    continue;
+                }
+                let obj_ref = match wrapper.object_ref() {
+                    Some(r) => r,
+                    None => continue,
+                };
+
+                // Build the new /V value from the modified value
+                let new_value: Object = match &wrapper.modified_value {
+                    Some(val) => val.into(),
+                    None => continue,
+                };
+
+                let is_button = wrapper
+                    .field_type()
+                    .map(|ft| *ft == FieldType::Button)
+                    .unwrap_or(false);
+
+                result.push((obj_ref.id, obj_ref.gen, new_value, is_button));
+            }
+            result
+        };
+
+        // Now load and update each field object
+        for (obj_id, obj_gen, new_value, is_button) in &fields_to_flush {
+            let obj_ref = ObjectRef::new(*obj_id, *obj_gen);
+            let original = self.source.load_object(obj_ref)?;
+
+            let dict = match original.as_dict() {
+                Some(d) => d.clone(),
+                None => continue,
+            };
+
+            let mut new_dict = dict;
+            new_dict.insert("V".to_string(), new_value.clone());
+
+            // For button fields (checkboxes/radios), also update /AS to match /V
+            if *is_button {
+                new_dict.insert("AS".to_string(), new_value.clone());
+            }
+
+            self.modified_objects
+                .insert(*obj_id, Object::Dictionary(new_dict));
+        }
+
+        // Set /NeedAppearances true in the AcroForm dictionary
+        if !fields_to_flush.is_empty() {
+            let catalog = self.source.catalog()?;
+            let catalog_dict = catalog
+                .as_dict()
+                .ok_or_else(|| Error::InvalidPdf("Catalog is not a dictionary".to_string()))?;
+
+            if let Some(acroform_obj) = catalog_dict.get("AcroForm") {
+                if let Some(acroform_ref) = acroform_obj.as_reference() {
+                    // AcroForm is an indirect reference — load, modify, and write back
+                    let acroform = self.source.load_object(acroform_ref)?;
+                    if let Some(af_dict) = acroform.as_dict() {
+                        let mut new_af = af_dict.clone();
+                        new_af.insert(
+                            "NeedAppearances".to_string(),
+                            Object::Boolean(true),
+                        );
+                        self.modified_objects
+                            .insert(acroform_ref.id, Object::Dictionary(new_af));
+                    }
+                } else if let Some(af_dict) = acroform_obj.as_dict() {
+                    // AcroForm is an inline dictionary in the catalog — modify catalog
+                    let mut new_af = af_dict.clone();
+                    new_af.insert(
+                        "NeedAppearances".to_string(),
+                        Object::Boolean(true),
+                    );
+                    let mut new_catalog = catalog_dict.clone();
+                    new_catalog.insert("AcroForm".to_string(), Object::Dictionary(new_af));
+
+                    // Get catalog object ID from trailer /Root reference
+                    if let Some(trailer_dict) = self.source.trailer().as_dict() {
+                        if let Some(root_ref) =
+                            trailer_dict.get("Root").and_then(|r| r.as_reference())
+                        {
+                            self.modified_objects
+                                .insert(root_ref.id, Object::Dictionary(new_catalog));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Find the offset of the previous xref table in the original PDF.
     fn find_prev_xref_offset(&self, bytes: &[u8]) -> Result<u64> {
         // Search backwards from the end for "startxref"
         let search = b"startxref";
-        let mut pos = bytes.len().saturating_sub(100);
+        let end = bytes.len();
+        let mut pos = if end >= search.len() {
+            end - search.len()
+        } else {
+            0
+        };
 
         while pos > 0 {
             if bytes[pos..].starts_with(search) {
@@ -3867,7 +3982,8 @@ impl DocumentEditor {
         for field in source_fields {
             if field.full_name == name {
                 // Create wrapper and set value
-                let mut wrapper = FormFieldWrapper::from_read(field, 0, None);
+                let obj_ref = field.object_ref;
+                let mut wrapper = FormFieldWrapper::from_read(field, 0, obj_ref);
                 wrapper.set_value(value);
 
                 self.modified_form_fields.insert(name.to_string(), wrapper);
