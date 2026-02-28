@@ -240,4 +240,187 @@ mod tests {
         assert_eq!(StructureConverter::format_struct_type(&StructType::P), "P");
         assert_eq!(StructureConverter::format_struct_type(&StructType::Table), "Table");
     }
+
+    #[test]
+    fn test_format_struct_type_all_variants() {
+        // Test all standard structure types
+        let cases = vec![
+            (StructType::Document, "Document"),
+            (StructType::Part, "Part"),
+            (StructType::Art, "Article"),
+            (StructType::Sect, "Section"),
+            (StructType::Div, "Division"),
+            (StructType::P, "P"),
+            (StructType::H, "H"),
+            (StructType::H1, "H1"),
+            (StructType::H2, "H2"),
+            (StructType::H3, "H3"),
+            (StructType::H4, "H4"),
+            (StructType::H5, "H5"),
+            (StructType::H6, "H6"),
+            (StructType::L, "List"),
+            (StructType::LI, "ListItem"),
+            (StructType::Lbl, "Label"),
+            (StructType::LBody, "ListBody"),
+            (StructType::Table, "Table"),
+            (StructType::THead, "TableHead"),
+            (StructType::TBody, "TableBody"),
+            (StructType::TFoot, "TableFoot"),
+            (StructType::TR, "TableRow"),
+            (StructType::TH, "TableHeader"),
+            (StructType::TD, "TableData"),
+            (StructType::Span, "Span"),
+            (StructType::Quote, "Quote"),
+            (StructType::Note, "Note"),
+            (StructType::Reference, "Reference"),
+            (StructType::BibEntry, "BibEntry"),
+            (StructType::Code, "Code"),
+            (StructType::Link, "Link"),
+            (StructType::Annot, "Annotation"),
+            (StructType::Figure, "Figure"),
+            (StructType::Formula, "Formula"),
+            (StructType::Form, "Form"),
+            (StructType::WB, "WordBreak"),
+            (StructType::Custom("MyType".to_string()), "MyType"),
+        ];
+        for (st, expected) in cases {
+            assert_eq!(StructureConverter::format_struct_type(&st), expected);
+        }
+    }
+
+    #[test]
+    fn test_extract_alt_text_missing() {
+        let attrs = HashMap::new();
+        assert_eq!(StructureConverter::extract_alt_text(&attrs), None);
+    }
+
+    #[test]
+    fn test_extract_alt_text_wrong_type() {
+        let mut attrs = HashMap::new();
+        attrs.insert("Alt".to_string(), Object::Integer(42));
+        assert_eq!(StructureConverter::extract_alt_text(&attrs), None);
+    }
+
+    #[test]
+    fn test_extract_language_missing() {
+        let attrs = HashMap::new();
+        assert_eq!(StructureConverter::extract_language(&attrs), None);
+    }
+
+    #[test]
+    fn test_extract_language_wrong_type() {
+        let mut attrs = HashMap::new();
+        attrs.insert("Lang".to_string(), Object::Integer(1));
+        assert_eq!(StructureConverter::extract_language(&attrs), None);
+    }
+
+    #[test]
+    fn test_convert_simple_struct_elem() {
+        use crate::elements::{FontSpec, TextContent, TextStyle};
+        use crate::geometry::Rect;
+
+        let mut mcid_map: HashMap<u32, Vec<ContentElement>> = HashMap::new();
+        mcid_map.insert(
+            0,
+            vec![ContentElement::Text(TextContent::new(
+                "Hello",
+                Rect::new(10.0, 20.0, 100.0, 12.0),
+                FontSpec::default(),
+                TextStyle::default(),
+            ))],
+        );
+
+        let converter = StructureConverter::new(mcid_map);
+
+        let mut elem = StructElem::new(StructType::P);
+        elem.add_child(StructChild::MarkedContentRef { mcid: 0, page: 0 });
+
+        let result = converter.convert_struct_elem(&elem).unwrap();
+        assert_eq!(result.structure_type, "P");
+        assert_eq!(result.children.len(), 1);
+    }
+
+    #[test]
+    fn test_convert_nested_struct_elem() {
+        let mcid_map: HashMap<u32, Vec<ContentElement>> = HashMap::new();
+        let converter = StructureConverter::new(mcid_map);
+
+        let mut root = StructElem::new(StructType::Document);
+        let child_p = StructElem::new(StructType::P);
+        root.add_child(StructChild::StructElem(Box::new(child_p)));
+
+        let result = converter.convert_struct_elem(&root).unwrap();
+        assert_eq!(result.structure_type, "Document");
+        assert_eq!(result.children.len(), 1);
+    }
+
+    #[test]
+    fn test_convert_with_object_ref() {
+        let mcid_map: HashMap<u32, Vec<ContentElement>> = HashMap::new();
+        let converter = StructureConverter::new(mcid_map);
+
+        let mut elem = StructElem::new(StructType::Div);
+        elem.add_child(StructChild::ObjectRef(42, 0));
+
+        let result = converter.convert_struct_elem(&elem).unwrap();
+        assert_eq!(result.structure_type, "Division");
+        // ObjectRef is silently skipped
+        assert_eq!(result.children.len(), 0);
+    }
+
+    #[test]
+    fn test_convert_missing_mcid() {
+        let mcid_map: HashMap<u32, Vec<ContentElement>> = HashMap::new();
+        let converter = StructureConverter::new(mcid_map);
+
+        let mut elem = StructElem::new(StructType::Span);
+        elem.add_child(StructChild::MarkedContentRef { mcid: 999, page: 0 });
+
+        let result = converter.convert_struct_elem(&elem).unwrap();
+        // Missing MCIDs are silently skipped
+        assert_eq!(result.children.len(), 0);
+    }
+
+    #[test]
+    fn test_convert_with_alt_text_and_language() {
+        let mcid_map: HashMap<u32, Vec<ContentElement>> = HashMap::new();
+        let converter = StructureConverter::new(mcid_map);
+
+        let mut elem = StructElem::new(StructType::Figure);
+        elem.attributes
+            .insert("Alt".to_string(), Object::String(b"A photo".to_vec()));
+        elem.attributes
+            .insert("Lang".to_string(), Object::String(b"en".to_vec()));
+
+        let result = converter.convert_struct_elem(&elem).unwrap();
+        assert_eq!(result.alt_text, Some("A photo".to_string()));
+        assert_eq!(result.language, Some("en".to_string()));
+    }
+
+    #[test]
+    fn test_calculate_bbox_with_children() {
+        use crate::elements::{FontSpec, TextContent, TextStyle};
+        use crate::geometry::Rect;
+
+        let children = vec![
+            ContentElement::Text(TextContent::new(
+                "A",
+                Rect::new(10.0, 20.0, 50.0, 12.0),
+                FontSpec::default(),
+                TextStyle::default(),
+            )),
+            ContentElement::Text(TextContent::new(
+                "B",
+                Rect::new(100.0, 50.0, 80.0, 14.0),
+                FontSpec::default(),
+                TextStyle::default(),
+            )),
+        ];
+
+        let bbox = StructureConverter::calculate_bbox(&children);
+        assert!(bbox.x <= 10.0);
+        assert!(bbox.y <= 20.0);
+        assert!(bbox.x + bbox.width >= 180.0); // 100 + 80
+        assert!(bbox.y + bbox.height >= 64.0); // 50 + 14
+    }
 }

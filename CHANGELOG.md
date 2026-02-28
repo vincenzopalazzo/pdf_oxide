@@ -2,6 +2,64 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [0.3.10] - 2026-02-26
+> 21 Issues Resolved — Parallel Extraction, WASM, Batch API, Text Quality, Table Improvements
+
+### New Features
+
+- **WASM build support** (#151) — WebAssembly bindings via wasm-bindgen. New `PdfDocument::open_from_bytes()` constructor enables browser-side PDF extraction. Internal reader changed from `BufReader<File>` to `BufReader<Cursor<Vec<u8>>>` for portability.
+
+- **Parallel page extraction** (#168) — New `parallel` feature flag with rayon-based multi-threaded extraction. `ParallelExtractor` distributes pages across worker threads, each opening its own PdfDocument instance. Global font cache ensures fonts are parsed only once.
+
+- **Batch processing API** (#167) — New `BatchProcessor` for multi-PDF workflows with progress callbacks and error collection. Supports both sequential and parallel (with `parallel` feature) processing. `BatchResult` and `BatchSummary` for per-file results and aggregate statistics.
+
+- **OCR hybrid detection** (#158) — New `PageType` enum (`NativeText`, `ScannedPage`, `HybridPage`) with multi-heuristic detection: text density, replacement character ratio, image coverage. `extract_text_with_ocr()` now intelligently selects between native text and OCR output.
+
+- **Full WASM/Python API parity** (#172, #173) — 10 new method groups across WASM and Python bindings: form field get/set, image bytes extraction, PDF-from-images, form flattening, PDF merging, file embedding, page labels, XMP metadata. Python gains `from_image()`, `from_images()`, `from_image_bytes()` constructors.
+
+### Bug Fixes
+
+- **Circular XObject segfault** (#163) — Fixed segfault from circular Form XObject references (X0→X1→X0) during image extraction. Cycle-detection stack now shared across all recursive `Do` calls.
+
+- **XRef /Prev chain overflow** (#170) — XRef `/Prev` chain parsing rewritten from recursive (depth limit 100) to iterative with `HashSet` cycle detection. Supports 177+ incremental saves.
+
+- **Broken ligature text** (#154) — `repair_ligatures()` post-processor fixes corrupted text from LaTeX PDFs with broken ToUnicode CMaps (fi→#, fl→$, ff→!, ffi→", ffl→%).
+
+- **Text extraction quality** (#104) — Three sub-categories improved: markup/link/popup annotation text extraction with /RC fallback, leader dot normalization for TOC output, and Priority 3 predefined CMap support for CJK fonts (Japan1, GB1, CNS1, Korea1).
+
+- **Reduce .unwrap() usage** (#155) — Replaced risky `.unwrap()` calls in core library paths with safe alternatives (`match`, `expect` with invariant comments, proper error propagation).
+
+- **Table extraction** (#157) — Spatial table detector now detects merged cells (colspan/rowspan) via bounding box analysis, supports multi-line cell content, and uses font property analysis for header row detection.
+
+- **Form field persistence in incremental save** (#174) — `DocumentEditor.save()` now correctly persists form field value changes when using incremental save mode.
+
+- **JPEG multi-filter extraction** — FlateDecode+DCTDecode filter chains now decode correctly, fixing garbled output from PDFs that apply multiple filters to JPEG image streams.
+
+- **OCR CTC blank token & recursion** — Fixed CTC decoding blank token handling and infinite recursion in OCR V5 strategy.
+
+### Code Quality
+
+- 85% test coverage enforced (4,200+ library tests), clippy enforcement with zero warnings, 31 lint fixes across the codebase.
+- Renamed version-referenced test files by topic for better discoverability.
+
+### Performance
+
+- **Image-only page skip** (#133, #169) — `page_cannot_have_text()` pre-check skips content stream decompression for pages with no `/Font` resources and no Form XObjects.
+
+- **SmallVec operator operands** (#165) — Stack-allocated `SmallVec<[Object; 6]>` replaces heap `Vec<Object>` for operator parsing. All standard PDF operators have ≤6 operands, eliminating per-operator allocation on graphics-heavy pages.
+
+- **Cross-document font cache** (#166) — Process-level LRU font cache (Layer 6) with 1024-entry default capacity. Fonts parsed by one PdfDocument are available to all subsequent instances via `OnceLock<Mutex<LruFontCache>>`.
+
+- **Large document performance** (#132) — Parallel extraction + global font cache + SmallVec + image-only skip combine to bring 1000-page PDFs well under 1 second on multi-core hardware.
+
+### Community Contributors
+
+Thanks to everyone who reported issues and contributed to v0.3.10:
+
+- **@SeanPedersen** — Reported corrupted ligature text in post-processing (#154)
+- **@dhdaines** — Reported circular XObject segfault (#163) and outdated dataset URLs in benchmark docs (#162)
+- **@bhaswata08** — Reported missing `extract_text_ocr` in Python bindings (#171)
+
 ## [0.3.9] - 2026-02-24
 > Performance: 20+ Micro-Optimizations — 40% Faster Text Extraction
 

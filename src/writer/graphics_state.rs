@@ -346,4 +346,250 @@ mod tests {
             assert!(dict.contains_key("BM"));
         }
     }
+
+    // ---- Tests for alpha clamping ----
+
+    #[test]
+    fn test_fill_alpha_clamped_above() {
+        let gs = ExtGStateBuilder::new().fill_alpha(2.0).build();
+        if let Object::Dictionary(dict) = gs {
+            if let Some(Object::Real(val)) = dict.get("ca") {
+                assert!((*val - 1.0).abs() < f64::EPSILON, "fill_alpha should be clamped to 1.0");
+            } else {
+                panic!("Expected Real for ca");
+            }
+        }
+    }
+
+    #[test]
+    fn test_fill_alpha_clamped_below() {
+        let gs = ExtGStateBuilder::new().fill_alpha(-0.5).build();
+        if let Object::Dictionary(dict) = gs {
+            if let Some(Object::Real(val)) = dict.get("ca") {
+                assert!((*val).abs() < f64::EPSILON, "fill_alpha should be clamped to 0.0");
+            } else {
+                panic!("Expected Real for ca");
+            }
+        }
+    }
+
+    #[test]
+    fn test_stroke_alpha_clamped_above() {
+        let gs = ExtGStateBuilder::new().stroke_alpha(1.5).build();
+        if let Object::Dictionary(dict) = gs {
+            if let Some(Object::Real(val)) = dict.get("CA") {
+                assert!((*val - 1.0).abs() < f64::EPSILON, "stroke_alpha should be clamped to 1.0");
+            } else {
+                panic!("Expected Real for CA");
+            }
+        }
+    }
+
+    // ---- Tests for alpha() convenience method ----
+
+    #[test]
+    fn test_alpha_sets_both() {
+        let gs = ExtGStateBuilder::new().alpha(0.3).build();
+        if let Object::Dictionary(dict) = gs {
+            assert!(dict.contains_key("ca"));
+            assert!(dict.contains_key("CA"));
+            if let (Some(Object::Real(fill)), Some(Object::Real(stroke))) =
+                (dict.get("ca"), dict.get("CA"))
+            {
+                assert!((*fill - 0.3).abs() < 0.01);
+                assert!((*stroke - 0.3).abs() < 0.01);
+            }
+        }
+    }
+
+    // ---- Tests for overprint settings ----
+
+    #[test]
+    fn test_overprint_stroke() {
+        let gs = ExtGStateBuilder::new().overprint_stroke(true).build();
+        if let Object::Dictionary(dict) = gs {
+            assert_eq!(dict.get("OP"), Some(&Object::Boolean(true)));
+        }
+    }
+
+    #[test]
+    fn test_overprint_fill() {
+        let gs = ExtGStateBuilder::new().overprint_fill(false).build();
+        if let Object::Dictionary(dict) = gs {
+            assert_eq!(dict.get("op"), Some(&Object::Boolean(false)));
+        }
+    }
+
+    // ---- Tests for line width and flatness ----
+
+    #[test]
+    fn test_line_width() {
+        let gs = ExtGStateBuilder::new().line_width(2.5).build();
+        if let Object::Dictionary(dict) = gs {
+            if let Some(Object::Real(val)) = dict.get("LW") {
+                assert!((*val - 2.5).abs() < 0.01);
+            } else {
+                panic!("Expected Real for LW");
+            }
+        }
+    }
+
+    #[test]
+    fn test_flatness() {
+        let gs = ExtGStateBuilder::new().flatness(50.0).build();
+        if let Object::Dictionary(dict) = gs {
+            if let Some(Object::Real(val)) = dict.get("FL") {
+                assert!((*val - 50.0).abs() < 0.01);
+            } else {
+                panic!("Expected Real for FL");
+            }
+        }
+    }
+
+    // ---- Tests for soft mask ----
+
+    #[test]
+    fn test_no_soft_mask() {
+        let gs = ExtGStateBuilder::new().no_soft_mask().build();
+        if let Object::Dictionary(dict) = gs {
+            if let Some(Object::Name(name)) = dict.get("SMask") {
+                assert_eq!(name, "None");
+            } else {
+                panic!("Expected Name(\"None\") for SMask");
+            }
+        }
+    }
+
+    #[test]
+    fn test_soft_mask_group_alpha() {
+        let gs = ExtGStateBuilder::new()
+            .soft_mask(SoftMask::Group {
+                group_ref: "G1".to_string(),
+                subtype: SoftMaskSubtype::Alpha,
+                backdrop: None,
+                transfer: None,
+            })
+            .build();
+        if let Object::Dictionary(dict) = gs {
+            if let Some(Object::Dictionary(smask_dict)) = dict.get("SMask") {
+                assert_eq!(smask_dict.get("S"), Some(&Object::Name("Alpha".to_string())));
+                assert_eq!(smask_dict.get("Type"), Some(&Object::Name("Mask".to_string())));
+                assert!(!smask_dict.contains_key("BC"));
+            } else {
+                panic!("Expected Dictionary for SMask");
+            }
+        }
+    }
+
+    #[test]
+    fn test_soft_mask_group_luminosity_with_backdrop() {
+        let gs = ExtGStateBuilder::new()
+            .soft_mask(SoftMask::Group {
+                group_ref: "G2".to_string(),
+                subtype: SoftMaskSubtype::Luminosity,
+                backdrop: Some(vec![1.0, 0.5, 0.0]),
+                transfer: None,
+            })
+            .build();
+        if let Object::Dictionary(dict) = gs {
+            if let Some(Object::Dictionary(smask_dict)) = dict.get("SMask") {
+                assert_eq!(smask_dict.get("S"), Some(&Object::Name("Luminosity".to_string())));
+                assert!(smask_dict.contains_key("BC"));
+                if let Some(Object::Array(bc)) = smask_dict.get("BC") {
+                    assert_eq!(bc.len(), 3);
+                }
+            } else {
+                panic!("Expected Dictionary for SMask");
+            }
+        }
+    }
+
+    // ---- Tests for predefined effects ----
+
+    #[test]
+    fn test_screen_effect() {
+        let gs = ExtGStateBuilder::screen().build();
+        if let Object::Dictionary(dict) = gs {
+            if let Some(Object::Name(name)) = dict.get("BM") {
+                assert_eq!(name, "Screen");
+            } else {
+                panic!("Expected BM with Screen");
+            }
+        }
+    }
+
+    #[test]
+    fn test_overlay_effect() {
+        let gs = ExtGStateBuilder::overlay().build();
+        if let Object::Dictionary(dict) = gs {
+            if let Some(Object::Name(name)) = dict.get("BM") {
+                assert_eq!(name, "Overlay");
+            } else {
+                panic!("Expected BM with Overlay");
+            }
+        }
+    }
+
+    #[test]
+    fn test_difference_effect() {
+        let gs = ExtGStateBuilder::difference().build();
+        if let Object::Dictionary(dict) = gs {
+            if let Some(Object::Name(name)) = dict.get("BM") {
+                assert_eq!(name, "Difference");
+            } else {
+                panic!("Expected BM with Difference");
+            }
+        }
+    }
+
+    // ---- Tests for default builder ----
+
+    #[test]
+    fn test_default_builder_only_has_type() {
+        let gs = ExtGStateBuilder::new().build();
+        if let Object::Dictionary(dict) = gs {
+            // Should only have "Type" key since nothing else was set
+            assert_eq!(dict.len(), 1);
+            assert_eq!(dict.get("Type"), Some(&Object::Name("ExtGState".to_string())));
+        }
+    }
+
+    // ---- Tests for chaining ----
+
+    #[test]
+    fn test_builder_chaining_many_properties() {
+        let gs = ExtGStateBuilder::new()
+            .fill_alpha(0.7)
+            .stroke_alpha(0.9)
+            .blend_mode(BlendMode::Overlay)
+            .overprint_stroke(true)
+            .overprint_fill(false)
+            .line_width(1.0)
+            .flatness(100.0)
+            .no_soft_mask()
+            .build();
+        if let Object::Dictionary(dict) = gs {
+            assert!(dict.contains_key("ca"));
+            assert!(dict.contains_key("CA"));
+            assert!(dict.contains_key("BM"));
+            assert!(dict.contains_key("OP"));
+            assert!(dict.contains_key("op"));
+            assert!(dict.contains_key("LW"));
+            assert!(dict.contains_key("FL"));
+            assert!(dict.contains_key("SMask"));
+            assert!(dict.contains_key("Type"));
+        } else {
+            panic!("Expected Dictionary");
+        }
+    }
+
+    // ---- Tests for soft_mask method ----
+
+    #[test]
+    fn test_soft_mask_none_variant() {
+        let gs = ExtGStateBuilder::new().soft_mask(SoftMask::None).build();
+        if let Object::Dictionary(dict) = gs {
+            assert_eq!(dict.get("SMask"), Some(&Object::Name("None".to_string())));
+        }
+    }
 }

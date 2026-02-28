@@ -325,4 +325,151 @@ mod tests {
         manager.clear();
         assert_eq!(manager.resource_count(), 0);
     }
+
+    #[test]
+    fn test_default() {
+        let manager = ResourceManager::default();
+        assert_eq!(manager.resource_count(), 0);
+    }
+
+    #[test]
+    fn test_get_font_resource() {
+        let mut manager = ResourceManager::new();
+        assert!(manager.get_font_resource("Helvetica").is_none());
+
+        manager.register_font("Helvetica");
+        let resource = manager.get_font_resource("Helvetica");
+        assert!(resource.is_some());
+        assert_eq!(resource.unwrap(), "/F1");
+    }
+
+    #[test]
+    fn test_fonts_list() {
+        let mut manager = ResourceManager::new();
+        manager.register_font("Helvetica");
+        manager.register_font("Times");
+
+        let fonts = manager.fonts();
+        assert_eq!(fonts.len(), 2);
+    }
+
+    #[test]
+    fn test_images_list() {
+        let mut manager = ResourceManager::new();
+        manager.register_image();
+        manager.register_image();
+
+        let images = manager.images();
+        assert_eq!(images.len(), 2);
+    }
+
+    #[test]
+    fn test_graphics_states_list() {
+        let mut manager = ResourceManager::new();
+        manager.register_graphics_state();
+
+        let states = manager.graphics_states();
+        assert_eq!(states.len(), 1);
+    }
+
+    #[test]
+    fn test_pattern_registration() {
+        let mut manager = ResourceManager::new();
+
+        let pat1 = manager.register_pattern();
+        assert_eq!(pat1, "/Pat1");
+
+        let pat2 = manager.register_pattern();
+        assert_eq!(pat2, "/Pat2");
+    }
+
+    #[test]
+    fn test_patterns_list() {
+        let mut manager = ResourceManager::new();
+        manager.register_pattern();
+        manager.register_pattern();
+
+        let patterns = manager.patterns();
+        assert_eq!(patterns.len(), 2);
+    }
+
+    #[test]
+    fn test_shading_registration() {
+        let mut manager = ResourceManager::new();
+
+        let sh1 = manager.register_shading();
+        assert_eq!(sh1, "/Sh1");
+
+        let sh2 = manager.register_shading();
+        assert_eq!(sh2, "/Sh2");
+    }
+
+    #[test]
+    fn test_shadings_list() {
+        let mut manager = ResourceManager::new();
+        manager.register_shading();
+
+        let shadings = manager.shadings();
+        assert_eq!(shadings.len(), 1);
+    }
+
+    #[test]
+    fn test_resource_count_all_types() {
+        let mut manager = ResourceManager::new();
+
+        manager.register_font("Courier");
+        manager.register_image();
+        manager.register_graphics_state();
+        manager.register_pattern();
+        manager.register_shading();
+
+        assert_eq!(manager.resource_count(), 5);
+    }
+
+    #[test]
+    fn test_clear_all_types() {
+        let mut manager = ResourceManager::new();
+
+        manager.register_font("Courier");
+        manager.register_image();
+        manager.register_graphics_state();
+        manager.register_pattern();
+        manager.register_shading();
+        assert_eq!(manager.resource_count(), 5);
+
+        manager.clear();
+        assert_eq!(manager.resource_count(), 0);
+        assert!(manager.fonts().is_empty());
+        assert!(manager.images().is_empty());
+        assert!(manager.graphics_states().is_empty());
+        assert!(manager.patterns().is_empty());
+        assert!(manager.shadings().is_empty());
+    }
+
+    #[test]
+    fn test_clone() {
+        let mut manager = ResourceManager::new();
+        manager.register_font("Helvetica");
+        manager.register_image();
+
+        let cloned = manager.clone();
+        assert_eq!(cloned.resource_count(), 2);
+        assert!(cloned.get_font_resource("Helvetica").is_some());
+    }
+
+    #[test]
+    fn test_debug() {
+        let manager = ResourceManager::new();
+        let debug = format!("{:?}", manager);
+        assert!(debug.contains("ResourceManager"));
+    }
+
+    #[test]
+    fn test_get_font_id() {
+        let mut manager = ResourceManager::new();
+        assert_eq!(manager.get_font_id("font:Helvetica"), 0); // not registered
+
+        manager.register_font("Helvetica");
+        assert_eq!(manager.get_font_id("font:Helvetica"), 1);
+    }
 }

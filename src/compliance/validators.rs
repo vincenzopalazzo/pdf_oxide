@@ -489,4 +489,101 @@ mod tests {
             ));
         }
     }
+
+    #[test]
+    fn test_validation_result_new() {
+        let result = ValidationResult::new(PdfALevel::A1a);
+        assert_eq!(result.level, PdfALevel::A1a);
+        assert!(!result.is_compliant);
+        assert!(result.errors.is_empty());
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_validation_result_add_warning() {
+        let mut result = ValidationResult::new(PdfALevel::A2b);
+        result.add_warning(ComplianceWarning::new(WarningCode::PartialCheck, "Partial check only"));
+        assert!(!result.warnings.is_empty());
+        assert!(!result.has_errors());
+    }
+
+    #[test]
+    fn test_validation_result_add_multiple_errors() {
+        let mut result = ValidationResult::new(PdfALevel::A1b);
+        result.add_error(ComplianceError::new(ErrorCode::EncryptionNotAllowed, "Encrypted"));
+        result.add_error(ComplianceError::new(ErrorCode::JavaScriptNotAllowed, "Has JavaScript"));
+        assert_eq!(result.errors.len(), 2);
+        assert!(result.has_errors());
+    }
+
+    #[test]
+    fn test_compliance_error_with_clause() {
+        let error =
+            ComplianceError::new(ErrorCode::MissingXmpMetadata, "No XMP").with_clause("6.7.2");
+        assert_eq!(error.code, ErrorCode::MissingXmpMetadata);
+        assert_eq!(error.clause.as_deref(), Some("6.7.2"));
+    }
+
+    #[test]
+    fn test_compliance_warning_codes() {
+        let warn = ComplianceWarning::new(
+            WarningCode::MissingRecommendedMetadata,
+            "Missing recommended metadata",
+        );
+        assert_eq!(warn.code, WarningCode::MissingRecommendedMetadata);
+
+        let warn2 = ComplianceWarning::new(WarningCode::PartialCheck, "Partial");
+        assert_eq!(warn2.code, WarningCode::PartialCheck);
+    }
+
+    #[test]
+    fn test_all_error_codes_debug() {
+        let codes = vec![
+            ErrorCode::MissingXmpMetadata,
+            ErrorCode::MissingPdfaIdentification,
+            ErrorCode::FontNotEmbedded,
+            ErrorCode::MissingOutputIntent,
+            ErrorCode::DeviceColorWithoutIntent,
+            ErrorCode::JavaScriptNotAllowed,
+            ErrorCode::EncryptionNotAllowed,
+            ErrorCode::TransparencyNotAllowed,
+            ErrorCode::EmbeddedFileNotAllowed,
+            ErrorCode::MissingDocumentStructure,
+            ErrorCode::MissingLanguage,
+            ErrorCode::MissingAppearanceStream,
+        ];
+        for code in codes {
+            let debug = format!("{:?}", code);
+            assert!(!debug.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_pdfa_level_allows_transparency() {
+        assert!(!PdfALevel::A1a.allows_transparency());
+        assert!(!PdfALevel::A1b.allows_transparency());
+        assert!(PdfALevel::A2a.allows_transparency());
+        assert!(PdfALevel::A2b.allows_transparency());
+        assert!(PdfALevel::A3a.allows_transparency());
+    }
+
+    #[test]
+    fn test_pdfa_level_requires_structure() {
+        assert!(PdfALevel::A1a.requires_structure());
+        assert!(!PdfALevel::A1b.requires_structure());
+        assert!(PdfALevel::A2a.requires_structure());
+        assert!(!PdfALevel::A2b.requires_structure());
+        assert!(PdfALevel::A3a.requires_structure());
+        assert!(!PdfALevel::A3b.requires_structure());
+    }
+
+    #[test]
+    fn test_pdfa_level_allows_embedded_files() {
+        assert!(!PdfALevel::A1a.allows_embedded_files());
+        assert!(!PdfALevel::A1b.allows_embedded_files());
+        assert!(!PdfALevel::A2a.allows_embedded_files());
+        assert!(!PdfALevel::A2b.allows_embedded_files());
+        assert!(PdfALevel::A3a.allows_embedded_files());
+        assert!(PdfALevel::A3b.allows_embedded_files());
+    }
 }

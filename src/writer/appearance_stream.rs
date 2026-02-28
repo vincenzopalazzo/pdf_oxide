@@ -1164,4 +1164,983 @@ mod tests {
         // Should have ExtGState resource for transparency
         assert!(dict.contains_key("Resources"));
     }
+
+    // ==========================================
+    // Builder construction tests
+    // ==========================================
+
+    #[test]
+    fn test_new_builder() {
+        let bbox = Rect::new(10.0, 20.0, 100.0, 50.0);
+        let builder = AppearanceStreamBuilder::new(bbox);
+        assert_eq!(builder.bbox().x, 10.0);
+        assert_eq!(builder.bbox().y, 20.0);
+        assert_eq!(builder.bbox().width, 100.0);
+        assert_eq!(builder.bbox().height, 50.0);
+    }
+
+    #[test]
+    fn test_new_builder_empty_content() {
+        let builder = AppearanceStreamBuilder::new(Rect::new(0.0, 0.0, 50.0, 50.0));
+        let (dict, content) = builder.build();
+        assert!(content.is_empty());
+        assert_eq!(dict.get("Length"), Some(&Object::Integer(0)));
+    }
+
+    // ==========================================
+    // Build method dictionary structure tests
+    // ==========================================
+
+    #[test]
+    fn test_build_dict_type() {
+        let builder = AppearanceStreamBuilder::new(Rect::new(0.0, 0.0, 50.0, 50.0));
+        let (dict, _) = builder.build();
+        assert_eq!(dict.get("Type"), Some(&Object::Name("XObject".to_string())));
+    }
+
+    #[test]
+    fn test_build_dict_subtype() {
+        let builder = AppearanceStreamBuilder::new(Rect::new(0.0, 0.0, 50.0, 50.0));
+        let (dict, _) = builder.build();
+        assert_eq!(dict.get("Subtype"), Some(&Object::Name("Form".to_string())));
+    }
+
+    #[test]
+    fn test_build_dict_form_type() {
+        let builder = AppearanceStreamBuilder::new(Rect::new(0.0, 0.0, 50.0, 50.0));
+        let (dict, _) = builder.build();
+        assert_eq!(dict.get("FormType"), Some(&Object::Integer(1)));
+    }
+
+    #[test]
+    fn test_build_dict_bbox() {
+        let bbox = Rect::new(5.0, 10.0, 100.0, 200.0);
+        let builder = AppearanceStreamBuilder::new(bbox);
+        let (dict, _) = builder.build();
+        let bbox_arr = dict.get("BBox").unwrap();
+        if let Object::Array(arr) = bbox_arr {
+            assert_eq!(arr.len(), 4);
+            // [x, y, x+width, y+height]
+            assert_eq!(arr[0], Object::Real(5.0));
+            assert_eq!(arr[1], Object::Real(10.0));
+            assert_eq!(arr[2], Object::Real(105.0));
+            assert_eq!(arr[3], Object::Real(210.0));
+        } else {
+            panic!("BBox should be an Array");
+        }
+    }
+
+    #[test]
+    fn test_build_no_matrix_by_default() {
+        let builder = AppearanceStreamBuilder::new(Rect::new(0.0, 0.0, 50.0, 50.0));
+        let (dict, _) = builder.build();
+        assert!(!dict.contains_key("Matrix"));
+    }
+
+    #[test]
+    fn test_build_no_resources_by_default() {
+        let builder = AppearanceStreamBuilder::new(Rect::new(0.0, 0.0, 50.0, 50.0));
+        let (dict, _) = builder.build();
+        assert!(!dict.contains_key("Resources"));
+    }
+
+    #[test]
+    fn test_build_dict_length_matches_content() {
+        let rect = Rect::new(0.0, 0.0, 100.0, 20.0);
+        let ap = AppearanceStreamBuilder::for_highlight(rect, AnnotationColor::red(), 1.0);
+        let (dict, content) = ap.build();
+        assert_eq!(dict.get("Length"), Some(&Object::Integer(content.len() as i64)));
+    }
+
+    // ==========================================
+    // Color operator tests (comprehensive)
+    // ==========================================
+
+    #[test]
+    fn test_color_fill_rgb() {
+        assert_eq!(
+            AppearanceStreamBuilder::color_to_fill_ops(&AnnotationColor::Rgb(0.5, 0.6, 0.7)),
+            Some("0.5 0.6 0.7 rg\n".to_string())
+        );
+    }
+
+    #[test]
+    fn test_color_fill_cmyk() {
+        assert_eq!(
+            AppearanceStreamBuilder::color_to_fill_ops(&AnnotationColor::Cmyk(0.1, 0.2, 0.3, 0.4)),
+            Some("0.1 0.2 0.3 0.4 k\n".to_string())
+        );
+    }
+
+    #[test]
+    fn test_color_stroke_gray() {
+        assert_eq!(
+            AppearanceStreamBuilder::color_to_stroke_ops(&AnnotationColor::Gray(0.75)),
+            Some("0.75 G\n".to_string())
+        );
+    }
+
+    #[test]
+    fn test_color_stroke_rgb() {
+        assert_eq!(
+            AppearanceStreamBuilder::color_to_stroke_ops(&AnnotationColor::Rgb(1.0, 0.0, 0.5)),
+            Some("1 0 0.5 RG\n".to_string())
+        );
+    }
+
+    #[test]
+    fn test_color_stroke_cmyk() {
+        assert_eq!(
+            AppearanceStreamBuilder::color_to_stroke_ops(&AnnotationColor::Cmyk(
+                0.0, 1.0, 0.0, 0.0
+            )),
+            Some("0 1 0 0 K\n".to_string())
+        );
+    }
+
+    #[test]
+    fn test_color_stroke_none() {
+        assert_eq!(AppearanceStreamBuilder::color_to_stroke_ops(&AnnotationColor::None), None);
+    }
+
+    // ==========================================
+    // Highlight appearance tests
+    // ==========================================
+
+    #[test]
+    fn test_highlight_full_opacity() {
+        let rect = Rect::new(0.0, 0.0, 100.0, 20.0);
+        let ap = AppearanceStreamBuilder::for_highlight(rect, AnnotationColor::yellow(), 1.0);
+
+        let (dict, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        // Full opacity: no GS1 graphics state
+        assert!(!content_str.contains("/GS1 gs"));
+        assert!(!dict.contains_key("Resources"));
+        assert!(content_str.contains("1 1 0 rg")); // yellow
+        assert!(content_str.contains("re f")); // fill rect
+    }
+
+    #[test]
+    fn test_highlight_partial_opacity() {
+        let rect = Rect::new(0.0, 0.0, 100.0, 20.0);
+        let ap = AppearanceStreamBuilder::for_highlight(rect, AnnotationColor::yellow(), 0.3);
+
+        let (dict, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        assert!(content_str.contains("/GS1 gs"));
+        assert!(dict.contains_key("Resources"));
+    }
+
+    #[test]
+    fn test_highlight_no_color() {
+        let rect = Rect::new(0.0, 0.0, 100.0, 20.0);
+        let ap = AppearanceStreamBuilder::for_highlight(rect, AnnotationColor::None, 0.5);
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+        // Should still have rect fill, but no color operator
+        assert!(content_str.contains("re f"));
+        assert!(!content_str.contains("rg"));
+    }
+
+    // ==========================================
+    // Underline appearance tests
+    // ==========================================
+
+    #[test]
+    fn test_underline_full_opacity() {
+        let rect = Rect::new(0.0, 0.0, 100.0, 20.0);
+        let ap = AppearanceStreamBuilder::for_underline(rect, AnnotationColor::red(), 1.0);
+
+        let (dict, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        assert!(!content_str.contains("/GS1 gs"));
+        assert!(!dict.contains_key("Resources"));
+        assert!(content_str.contains("1 0 0 RG")); // red stroke
+        assert!(content_str.contains("1 w")); // 1pt width
+        assert!(content_str.contains("0 0 m")); // start at origin
+    }
+
+    #[test]
+    fn test_underline_partial_opacity() {
+        let rect = Rect::new(0.0, 0.0, 200.0, 15.0);
+        let ap = AppearanceStreamBuilder::for_underline(rect, AnnotationColor::blue(), 0.7);
+
+        let (dict, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        assert!(content_str.contains("/GS1 gs"));
+        assert!(dict.contains_key("Resources"));
+    }
+
+    // ==========================================
+    // Strikeout appearance tests
+    // ==========================================
+
+    #[test]
+    fn test_strikeout_midline_position() {
+        let rect = Rect::new(0.0, 0.0, 100.0, 30.0);
+        let ap = AppearanceStreamBuilder::for_strikeout(rect, AnnotationColor::red(), 1.0);
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        // Midline should be at height/2 = 15
+        assert!(content_str.contains("15 m")); // move to y=15
+        assert!(content_str.contains("100 15 l S")); // line to right at y=15
+    }
+
+    #[test]
+    fn test_strikeout_partial_opacity() {
+        let rect = Rect::new(0.0, 0.0, 100.0, 20.0);
+        let ap = AppearanceStreamBuilder::for_strikeout(rect, AnnotationColor::red(), 0.5);
+
+        let (dict, _) = ap.build();
+        assert!(dict.contains_key("Resources"));
+    }
+
+    // ==========================================
+    // Squiggly underline tests
+    // ==========================================
+
+    #[test]
+    fn test_squiggly_wave_pattern() {
+        let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let ap = AppearanceStreamBuilder::for_squiggly(rect, AnnotationColor::red(), 1.0);
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        assert!(content_str.contains("0.5 w")); // thin stroke
+        assert!(content_str.contains("0 0 m")); // start at origin
+        assert!(content_str.contains("v")); // curve operator
+        assert!(content_str.contains("S")); // stroke
+    }
+
+    #[test]
+    fn test_squiggly_partial_opacity() {
+        let rect = Rect::new(0.0, 0.0, 100.0, 20.0);
+        let ap = AppearanceStreamBuilder::for_squiggly(rect, AnnotationColor::green(), 0.6);
+
+        let (dict, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        assert!(content_str.contains("/GS1 gs"));
+        assert!(dict.contains_key("Resources"));
+    }
+
+    #[test]
+    fn test_squiggly_zero_width() {
+        // Degenerate case: zero-width rect
+        let rect = Rect::new(0.0, 0.0, 0.0, 10.0);
+        let ap = AppearanceStreamBuilder::for_squiggly(rect, AnnotationColor::red(), 1.0);
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+        // Should not enter the while loop, just have start point and stroke
+        assert!(content_str.contains("S"));
+    }
+
+    // ==========================================
+    // Text note (sticky note) icon tests
+    // ==========================================
+
+    #[test]
+    fn test_text_note_comment_icon() {
+        let rect = Rect::new(0.0, 0.0, 24.0, 24.0);
+        let ap = AppearanceStreamBuilder::for_text_note(
+            rect,
+            TextAnnotationIcon::Comment,
+            AnnotationColor::yellow(),
+        );
+        let (_, content) = ap.build();
+        assert!(!content.is_empty());
+        let content_str = String::from_utf8_lossy(&content);
+        // Comment icon has a speech tail with "f" fill
+        assert!(content_str.contains("h B"));
+    }
+
+    #[test]
+    fn test_text_note_key_icon() {
+        let rect = Rect::new(0.0, 0.0, 24.0, 24.0);
+        let ap = AppearanceStreamBuilder::for_text_note(
+            rect,
+            TextAnnotationIcon::Key,
+            AnnotationColor::Rgb(0.5, 0.5, 0.5),
+        );
+        let (_, content) = ap.build();
+        assert!(!content.is_empty());
+        let content_str = String::from_utf8_lossy(&content);
+        assert!(content_str.contains("c")); // circle curves in key head
+        assert!(content_str.contains("S")); // stroke
+    }
+
+    #[test]
+    fn test_text_note_help_icon() {
+        let rect = Rect::new(0.0, 0.0, 24.0, 24.0);
+        let ap = AppearanceStreamBuilder::for_text_note(
+            rect,
+            TextAnnotationIcon::Help,
+            AnnotationColor::blue(),
+        );
+        let (_, content) = ap.build();
+        assert!(!content.is_empty());
+        let content_str = String::from_utf8_lossy(&content);
+        // Help icon has question mark curve + dot
+        assert!(content_str.contains("c")); // curves
+        assert!(content_str.contains("re f")); // dot square
+    }
+
+    #[test]
+    fn test_text_note_insert_icon() {
+        let rect = Rect::new(0.0, 0.0, 24.0, 24.0);
+        let ap = AppearanceStreamBuilder::for_text_note(
+            rect,
+            TextAnnotationIcon::Insert,
+            AnnotationColor::green(),
+        );
+        let (_, content) = ap.build();
+        assert!(!content.is_empty());
+        let content_str = String::from_utf8_lossy(&content);
+        assert!(content_str.contains("m")); // move
+        assert!(content_str.contains("l S")); // line stroke
+    }
+
+    #[test]
+    fn test_text_note_paragraph_icon() {
+        let rect = Rect::new(0.0, 0.0, 24.0, 24.0);
+        let ap = AppearanceStreamBuilder::for_text_note(
+            rect,
+            TextAnnotationIcon::Paragraph,
+            AnnotationColor::red(),
+        );
+        let (_, content) = ap.build();
+        assert!(!content.is_empty());
+    }
+
+    #[test]
+    fn test_text_note_new_paragraph_icon() {
+        let rect = Rect::new(0.0, 0.0, 24.0, 24.0);
+        let ap = AppearanceStreamBuilder::for_text_note(
+            rect,
+            TextAnnotationIcon::NewParagraph,
+            AnnotationColor::red(),
+        );
+        let (_, content) = ap.build();
+        assert!(!content.is_empty());
+    }
+
+    #[test]
+    fn test_text_note_uses_min_dimension() {
+        // Non-square rect: should use min(width, height) = 20
+        let rect = Rect::new(0.0, 0.0, 20.0, 40.0);
+        let ap = AppearanceStreamBuilder::for_text_note(
+            rect,
+            TextAnnotationIcon::Note,
+            AnnotationColor::yellow(),
+        );
+        assert_eq!(ap.bbox().width, 20.0);
+        assert_eq!(ap.bbox().height, 20.0);
+    }
+
+    #[test]
+    fn test_text_note_no_color() {
+        let rect = Rect::new(0.0, 0.0, 24.0, 24.0);
+        let ap = AppearanceStreamBuilder::for_text_note(
+            rect,
+            TextAnnotationIcon::Note,
+            AnnotationColor::None,
+        );
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+        // No fill color operator
+        assert!(!content_str.contains("rg"));
+        assert!(!content_str.contains(" g\n"));
+    }
+
+    // ==========================================
+    // Stamp appearance tests
+    // ==========================================
+
+    #[test]
+    fn test_stamp_rounded_corners() {
+        let rect = Rect::new(0.0, 0.0, 120.0, 40.0);
+        let ap = AppearanceStreamBuilder::for_stamp(
+            rect,
+            StampType::Confidential,
+            AnnotationColor::Rgb(0.8, 0.0, 0.0),
+        );
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        assert!(content_str.contains("2 w")); // 2pt width
+        assert!(content_str.contains("c")); // Bezier curves for corners
+        assert!(content_str.contains("l")); // straight edges
+        assert!(content_str.contains("S")); // stroke
+    }
+
+    #[test]
+    fn test_stamp_small_rect() {
+        // Small rect should limit corner radius
+        let rect = Rect::new(0.0, 0.0, 12.0, 6.0);
+        let ap =
+            AppearanceStreamBuilder::for_stamp(rect, StampType::Approved, AnnotationColor::green());
+        let (_, content) = ap.build();
+        assert!(!content.is_empty());
+    }
+
+    // ==========================================
+    // Line appearance tests
+    // ==========================================
+
+    #[test]
+    fn test_line_with_open_arrow() {
+        let ap = AppearanceStreamBuilder::for_line(
+            (20.0, 20.0),
+            (100.0, 80.0),
+            AnnotationColor::black(),
+            1.5,
+            LineEndingStyle::OpenArrow,
+            LineEndingStyle::None,
+        );
+
+        let (dict, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        assert!(dict.contains_key("Matrix"));
+        assert!(content_str.contains("l S")); // main line
+                                              // Open arrow: two separate line strokes
+    }
+
+    #[test]
+    fn test_line_with_circle_ending() {
+        let ap = AppearanceStreamBuilder::for_line(
+            (10.0, 10.0),
+            (200.0, 10.0),
+            AnnotationColor::blue(),
+            2.0,
+            LineEndingStyle::None,
+            LineEndingStyle::Circle,
+        );
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        assert!(content_str.contains("c")); // circle uses Bezier curves
+    }
+
+    #[test]
+    fn test_line_with_square_ending() {
+        let ap = AppearanceStreamBuilder::for_line(
+            (10.0, 10.0),
+            (200.0, 10.0),
+            AnnotationColor::red(),
+            1.0,
+            LineEndingStyle::Square,
+            LineEndingStyle::None,
+        );
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        assert!(content_str.contains("re S")); // square is a rectangle stroke
+    }
+
+    #[test]
+    fn test_line_with_diamond_ending() {
+        let ap = AppearanceStreamBuilder::for_line(
+            (10.0, 10.0),
+            (200.0, 10.0),
+            AnnotationColor::green(),
+            1.0,
+            LineEndingStyle::None,
+            LineEndingStyle::Diamond,
+        );
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        assert!(content_str.contains("h S")); // diamond closes path and strokes
+    }
+
+    #[test]
+    fn test_line_both_endings() {
+        let ap = AppearanceStreamBuilder::for_line(
+            (0.0, 0.0),
+            (100.0, 100.0),
+            AnnotationColor::black(),
+            1.0,
+            LineEndingStyle::ClosedArrow,
+            LineEndingStyle::ClosedArrow,
+        );
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+        // Two arrow heads: should have "h f" twice
+        let count = content_str.matches("h f").count();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_line_matrix_offset() {
+        let ap = AppearanceStreamBuilder::for_line(
+            (50.0, 50.0),
+            (150.0, 150.0),
+            AnnotationColor::black(),
+            1.0,
+            LineEndingStyle::None,
+            LineEndingStyle::None,
+        );
+
+        let (dict, _) = ap.build();
+        assert!(dict.contains_key("Matrix"));
+        if let Some(Object::Array(m)) = dict.get("Matrix") {
+            assert_eq!(m.len(), 6);
+            // Matrix should be [1,0,0,1, min_x, min_y]
+            assert_eq!(m[0], Object::Real(1.0));
+            assert_eq!(m[1], Object::Real(0.0));
+        }
+    }
+
+    // ==========================================
+    // Rectangle appearance tests
+    // ==========================================
+
+    #[test]
+    fn test_rectangle_stroke_only() {
+        let rect = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let ap = AppearanceStreamBuilder::for_rectangle(rect, AnnotationColor::red(), None, 2.0);
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        assert!(content_str.contains("2 w")); // line width
+        assert!(content_str.contains("re S")); // stroke only (no "B")
+    }
+
+    #[test]
+    fn test_rectangle_fill_and_stroke() {
+        let rect = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let ap = AppearanceStreamBuilder::for_rectangle(
+            rect,
+            AnnotationColor::red(),
+            Some(AnnotationColor::Rgb(0.9, 0.9, 0.9)),
+            1.0,
+        );
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        assert!(content_str.contains("re B")); // fill and stroke
+        assert!(content_str.contains("rg")); // fill color
+        assert!(content_str.contains("RG")); // stroke color
+    }
+
+    // ==========================================
+    // Circle appearance tests
+    // ==========================================
+
+    #[test]
+    fn test_circle_stroke_only() {
+        let rect = Rect::new(0.0, 0.0, 50.0, 50.0);
+        let ap = AppearanceStreamBuilder::for_circle(rect, AnnotationColor::blue(), None, 1.0);
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        // Should end with S (stroke only)
+        assert!(content_str.ends_with("S\n"));
+        assert!(!content_str.contains("B\n")); // no fill+stroke
+    }
+
+    #[test]
+    fn test_circle_fill_and_stroke() {
+        let rect = Rect::new(0.0, 0.0, 80.0, 60.0);
+        let ap = AppearanceStreamBuilder::for_circle(
+            rect,
+            AnnotationColor::black(),
+            Some(AnnotationColor::Rgb(1.0, 1.0, 0.0)),
+            2.0,
+        );
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        assert!(content_str.contains("B\n")); // fill and stroke
+        assert!(content_str.contains("c")); // Bezier curves
+    }
+
+    #[test]
+    fn test_circle_four_bezier_segments() {
+        let rect = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let ap = AppearanceStreamBuilder::for_circle(rect, AnnotationColor::red(), None, 1.0);
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        // An ellipse approximation uses 4 Bezier curves
+        assert_eq!(content_str.matches(" c\n").count(), 4);
+    }
+
+    // ==========================================
+    // Ink appearance tests
+    // ==========================================
+
+    #[test]
+    fn test_ink_empty_strokes() {
+        let strokes: Vec<Vec<(f64, f64)>> = vec![];
+        let ap = AppearanceStreamBuilder::for_ink(&strokes, AnnotationColor::black(), 1.0);
+
+        assert_eq!(ap.bbox().width, 1.0);
+        assert_eq!(ap.bbox().height, 1.0);
+    }
+
+    #[test]
+    fn test_ink_single_point_stroke() {
+        let strokes = vec![vec![(50.0, 50.0)]];
+        let ap = AppearanceStreamBuilder::for_ink(&strokes, AnnotationColor::blue(), 2.0);
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        // Single point: move + stroke, no line
+        assert!(content_str.contains("m\n"));
+        assert!(content_str.contains("S\n"));
+    }
+
+    #[test]
+    fn test_ink_multiple_strokes() {
+        let strokes = vec![
+            vec![(10.0, 10.0), (50.0, 50.0)],
+            vec![(60.0, 60.0), (100.0, 100.0)],
+        ];
+        let ap = AppearanceStreamBuilder::for_ink(&strokes, AnnotationColor::red(), 1.0);
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        // Should have two "S\n" (one per stroke)
+        assert_eq!(content_str.matches("S\n").count(), 2);
+        // Should have two "m\n" (moveTo at start of each stroke)
+        assert_eq!(content_str.matches("m\n").count(), 2);
+    }
+
+    #[test]
+    fn test_ink_stroke_with_empty_subpath() {
+        let strokes = vec![
+            vec![], // empty stroke
+            vec![(10.0, 10.0), (50.0, 50.0)],
+        ];
+        let ap = AppearanceStreamBuilder::for_ink(&strokes, AnnotationColor::blue(), 1.0);
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        // Only one stroke drawn (empty is skipped)
+        assert_eq!(content_str.matches("S\n").count(), 1);
+    }
+
+    #[test]
+    fn test_ink_line_cap_and_join() {
+        let strokes = vec![vec![(0.0, 0.0), (100.0, 100.0)]];
+        let ap = AppearanceStreamBuilder::for_ink(&strokes, AnnotationColor::black(), 3.0);
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        assert!(content_str.contains("1 J")); // round cap
+        assert!(content_str.contains("1 j")); // round join
+        assert!(content_str.contains("3 w")); // line width 3
+    }
+
+    // ==========================================
+    // Caret appearance tests
+    // ==========================================
+
+    #[test]
+    fn test_caret_none_symbol() {
+        let rect = Rect::new(0.0, 0.0, 20.0, 30.0);
+        let ap =
+            AppearanceStreamBuilder::for_caret(rect, CaretSymbol::None, AnnotationColor::blue());
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        // Caret (^) shape: move to 0,0 -> line to w/2,h -> line to w,0
+        assert!(content_str.contains("0 0 m"));
+    }
+
+    #[test]
+    fn test_caret_paragraph_symbol() {
+        let rect = Rect::new(0.0, 0.0, 20.0, 20.0);
+        let ap = AppearanceStreamBuilder::for_caret(
+            rect,
+            CaretSymbol::Paragraph,
+            AnnotationColor::black(),
+        );
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        // Paragraph icon uses pilcrow shape
+        assert!(content_str.contains("1 w")); // vertical lines width
+    }
+
+    // ==========================================
+    // Redact appearance tests
+    // ==========================================
+
+    #[test]
+    fn test_redact_default_black() {
+        let rect = Rect::new(0.0, 0.0, 100.0, 20.0);
+        let ap = AppearanceStreamBuilder::for_redact(rect, None);
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        assert!(content_str.contains("0 g")); // black
+        assert!(content_str.contains("re f")); // fill
+    }
+
+    #[test]
+    fn test_redact_custom_color() {
+        let rect = Rect::new(0.0, 0.0, 100.0, 20.0);
+        let ap =
+            AppearanceStreamBuilder::for_redact(rect, Some(AnnotationColor::Rgb(0.5, 0.5, 0.5)));
+
+        let (_, content) = ap.build();
+        let content_str = String::from_utf8_lossy(&content);
+
+        assert!(content_str.contains("0.5 0.5 0.5 rg")); // custom gray
+        assert!(content_str.contains("re f"));
+    }
+
+    // ==========================================
+    // Icon drawing function tests
+    // ==========================================
+
+    #[test]
+    fn test_draw_note_icon() {
+        let s = AppearanceStreamBuilder::draw_note_icon(24.0);
+        assert!(!s.is_empty());
+        assert!(s.contains("h B")); // closed path fill+stroke
+        assert!(s.contains("l S")); // fold line stroke
+    }
+
+    #[test]
+    fn test_draw_comment_icon() {
+        let s = AppearanceStreamBuilder::draw_comment_icon(24.0);
+        assert!(!s.is_empty());
+        assert!(s.contains("h B")); // speech bubble body
+        assert!(s.contains("l f")); // tail fill
+    }
+
+    #[test]
+    fn test_draw_key_icon() {
+        let s = AppearanceStreamBuilder::draw_key_icon(24.0);
+        assert!(!s.is_empty());
+        assert!(s.contains("S")); // stroke circle
+        assert!(s.contains("h f")); // shaft fill
+    }
+
+    #[test]
+    fn test_draw_help_icon() {
+        let s = AppearanceStreamBuilder::draw_help_icon(24.0);
+        assert!(!s.is_empty());
+        assert!(s.contains("c")); // curves for question mark
+        assert!(s.contains("re f")); // dot
+    }
+
+    #[test]
+    fn test_draw_insert_icon() {
+        let s = AppearanceStreamBuilder::draw_insert_icon(24.0);
+        assert!(!s.is_empty());
+        assert!(s.contains("m")); // move
+        assert!(s.contains("l S")); // line stroke
+    }
+
+    #[test]
+    fn test_draw_paragraph_icon() {
+        let s = AppearanceStreamBuilder::draw_paragraph_icon(24.0);
+        assert!(!s.is_empty());
+        assert!(s.contains("1 w")); // line width
+        assert!(s.contains("l S")); // vertical lines
+        assert!(s.contains("c S")); // curved top
+    }
+
+    // ==========================================
+    // Line ending drawing tests
+    // ==========================================
+
+    #[test]
+    fn test_draw_line_ending_none() {
+        let s = AppearanceStreamBuilder::draw_line_ending(
+            0.0,
+            0.0,
+            100.0,
+            0.0,
+            LineEndingStyle::None,
+            false,
+        );
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn test_draw_line_ending_open_arrow() {
+        let s = AppearanceStreamBuilder::draw_line_ending(
+            0.0,
+            0.0,
+            100.0,
+            0.0,
+            LineEndingStyle::OpenArrow,
+            false,
+        );
+        assert!(!s.is_empty());
+        assert!(s.contains("l S")); // two line strokes
+    }
+
+    #[test]
+    fn test_draw_line_ending_closed_arrow() {
+        let s = AppearanceStreamBuilder::draw_line_ending(
+            0.0,
+            0.0,
+            100.0,
+            0.0,
+            LineEndingStyle::ClosedArrow,
+            false,
+        );
+        assert!(!s.is_empty());
+        assert!(s.contains("h f")); // filled triangle
+    }
+
+    #[test]
+    fn test_draw_line_ending_circle() {
+        let s = AppearanceStreamBuilder::draw_line_ending(
+            0.0,
+            0.0,
+            100.0,
+            0.0,
+            LineEndingStyle::Circle,
+            false,
+        );
+        assert!(!s.is_empty());
+        assert!(s.contains("c S")); // Bezier circle
+    }
+
+    #[test]
+    fn test_draw_line_ending_square() {
+        let s = AppearanceStreamBuilder::draw_line_ending(
+            0.0,
+            0.0,
+            100.0,
+            0.0,
+            LineEndingStyle::Square,
+            false,
+        );
+        assert!(!s.is_empty());
+        assert!(s.contains("re S")); // rectangle stroke
+    }
+
+    #[test]
+    fn test_draw_line_ending_diamond() {
+        let s = AppearanceStreamBuilder::draw_line_ending(
+            0.0,
+            0.0,
+            100.0,
+            0.0,
+            LineEndingStyle::Diamond,
+            false,
+        );
+        assert!(!s.is_empty());
+        assert!(s.contains("h S")); // closed diamond
+    }
+
+    #[test]
+    fn test_draw_line_ending_at_start() {
+        // Arrow at start should point in opposite direction
+        let s_start = AppearanceStreamBuilder::draw_line_ending(
+            0.0,
+            0.0,
+            100.0,
+            0.0,
+            LineEndingStyle::OpenArrow,
+            true,
+        );
+        let s_end = AppearanceStreamBuilder::draw_line_ending(
+            0.0,
+            0.0,
+            100.0,
+            0.0,
+            LineEndingStyle::OpenArrow,
+            false,
+        );
+        // They should be different (different angles)
+        assert_ne!(s_start, s_end);
+    }
+
+    #[test]
+    fn test_draw_line_ending_butt_fallthrough() {
+        // Butt style goes through the _ => {} branch
+        let s = AppearanceStreamBuilder::draw_line_ending(
+            0.0,
+            0.0,
+            100.0,
+            0.0,
+            LineEndingStyle::Butt,
+            false,
+        );
+        assert!(s.is_empty()); // Butt falls through to default empty
+    }
+
+    // ==========================================
+    // ext_gstate resource tests
+    // ==========================================
+
+    #[test]
+    fn test_ext_gstate_opacity_values() {
+        let rect = Rect::new(0.0, 0.0, 100.0, 20.0);
+        let ap = AppearanceStreamBuilder::for_highlight(rect, AnnotationColor::yellow(), 0.3);
+
+        let (dict, _) = ap.build();
+        // Check resources contain ExtGState with CA and ca values
+        if let Some(Object::Dictionary(resources)) = dict.get("Resources") {
+            if let Some(Object::Dictionary(ext_gstate)) = resources.get("ExtGState") {
+                if let Some(Object::Dictionary(gs1)) = ext_gstate.get("GS1") {
+                    // Check opacity values approximate 0.3
+                    if let Some(Object::Real(ca)) = gs1.get("CA") {
+                        assert!((*ca - 0.3).abs() < 0.01);
+                    }
+                    if let Some(Object::Real(ca)) = gs1.get("ca") {
+                        assert!((*ca - 0.3).abs() < 0.01);
+                    }
+                    assert_eq!(gs1.get("Type"), Some(&Object::Name("ExtGState".to_string())));
+                } else {
+                    panic!("GS1 not found in ExtGState");
+                }
+            } else {
+                panic!("ExtGState not found in Resources");
+            }
+        } else {
+            panic!("Resources not found");
+        }
+    }
+
+    // ==========================================
+    // bbox accessor test
+    // ==========================================
+
+    #[test]
+    fn test_bbox_accessor() {
+        let rect = Rect::new(5.0, 10.0, 200.0, 100.0);
+        let ap = AppearanceStreamBuilder::for_highlight(rect, AnnotationColor::red(), 1.0);
+        // for_highlight creates bbox from [0, 0, width, height]
+        assert_eq!(ap.bbox().x, 0.0);
+        assert_eq!(ap.bbox().y, 0.0);
+        assert_eq!(ap.bbox().width, 200.0);
+        assert_eq!(ap.bbox().height, 100.0);
+    }
 }

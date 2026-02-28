@@ -276,10 +276,28 @@ impl Default for SyntheticStructureGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::elements::{FontSpec, TextContent, TextStyle};
+
+    fn make_text_element(text: &str, x: f32, y: f32, w: f32, h: f32) -> ContentElement {
+        ContentElement::Text(TextContent::new(
+            text,
+            Rect::new(x, y, w, h),
+            FontSpec::default(),
+            TextStyle::default(),
+        ))
+    }
 
     #[test]
     fn test_generator_creation() {
         let _generator = SyntheticStructureGenerator::new();
+    }
+
+    #[test]
+    fn test_generator_default() {
+        let gen = SyntheticStructureGenerator::default();
+        let page_bbox = Rect::new(0.0, 0.0, 595.0, 842.0);
+        let result = gen.generate(&[], page_bbox).unwrap();
+        assert_eq!(result.structure_type, "Document");
     }
 
     #[test]
@@ -290,6 +308,9 @@ mod tests {
 
         assert_eq!(result.structure_type, "Document");
         assert!(result.children.is_empty());
+        assert_eq!(result.reading_order, Some(0));
+        assert!(result.alt_text.is_none());
+        assert!(result.language.is_none());
     }
 
     #[test]
@@ -301,11 +322,169 @@ mod tests {
     }
 
     #[test]
+    fn test_custom_config() {
+        let config = SyntheticStructureConfig {
+            paragraph_gap_threshold: 10.0,
+            heading_size_multiplier: 2.0,
+            section_break_threshold: 100.0,
+        };
+        let gen = SyntheticStructureGenerator::with_config(config);
+        // Just verify it can be created and used
+        let page_bbox = Rect::new(0.0, 0.0, 595.0, 842.0);
+        let result = gen.generate(&[], page_bbox).unwrap();
+        assert_eq!(result.structure_type, "Document");
+    }
+
+    #[test]
+    fn test_config_debug_clone() {
+        let config = SyntheticStructureConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.paragraph_gap_threshold, 4.0);
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("SyntheticStructureConfig"));
+    }
+
+    #[test]
+    fn test_single_element() {
+        let generator = SyntheticStructureGenerator::new();
+        let page_bbox = Rect::new(0.0, 0.0, 595.0, 842.0);
+        let elements = vec![make_text_element("Hello", 10.0, 100.0, 50.0, 12.0)];
+        let result = generator.generate(&elements, page_bbox).unwrap();
+
+        assert_eq!(result.structure_type, "Document");
+        assert!(!result.children.is_empty());
+    }
+
+    #[test]
+    fn test_close_elements_grouped_into_paragraph() {
+        let generator = SyntheticStructureGenerator::new();
+        let page_bbox = Rect::new(0.0, 0.0, 595.0, 842.0);
+        // Two elements very close together (gap < 4.0)
+        let elements = vec![
+            make_text_element("Line 1", 10.0, 100.0, 200.0, 12.0),
+            make_text_element("Line 2", 10.0, 101.0, 200.0, 12.0),
+        ];
+        let result = generator.generate(&elements, page_bbox).unwrap();
+        assert_eq!(result.structure_type, "Document");
+        // Both should be in same paragraph -> 1 section -> 1 paragraph
+        // Document -> 1 Sect -> 1 P with 2 children
+    }
+
+    #[test]
+    fn test_distant_elements_separate_paragraphs() {
+        let generator = SyntheticStructureGenerator::new();
+        let page_bbox = Rect::new(0.0, 0.0, 595.0, 842.0);
+        // Two elements far apart (gap > 4.0)
+        let elements = vec![
+            make_text_element("Paragraph 1", 10.0, 100.0, 200.0, 12.0),
+            make_text_element("Paragraph 2", 10.0, 200.0, 200.0, 12.0),
+        ];
+        let result = generator.generate(&elements, page_bbox).unwrap();
+        assert_eq!(result.structure_type, "Document");
+        // Should have at least 1 section child
+        assert!(!result.children.is_empty());
+    }
+
+    #[test]
     fn test_calculate_bbox_empty() {
         let bbox = SyntheticStructureGenerator::calculate_bbox(&[]);
         assert_eq!(bbox.x, 0.0);
         assert_eq!(bbox.y, 0.0);
         assert_eq!(bbox.width, 0.0);
         assert_eq!(bbox.height, 0.0);
+    }
+
+    #[test]
+    fn test_calculate_bbox_single_element() {
+        let elements = vec![make_text_element("Test", 10.0, 20.0, 100.0, 12.0)];
+        let bbox = SyntheticStructureGenerator::calculate_bbox(&elements);
+        assert_eq!(bbox.x, 10.0);
+        assert_eq!(bbox.y, 20.0);
+        assert_eq!(bbox.width, 100.0);
+        assert_eq!(bbox.height, 12.0);
+    }
+
+    #[test]
+    fn test_calculate_bbox_multiple_elements() {
+        let elements = vec![
+            make_text_element("A", 10.0, 20.0, 50.0, 12.0),
+            make_text_element("B", 100.0, 50.0, 80.0, 14.0),
+        ];
+        let bbox = SyntheticStructureGenerator::calculate_bbox(&elements);
+        assert_eq!(bbox.x, 10.0);
+        assert_eq!(bbox.y, 20.0);
+        // max_x = max(10+50, 100+80) = 180; width = 180-10 = 170
+        assert_eq!(bbox.width, 170.0);
+        // max_y = max(20+12, 50+14) = 64; height = 64-20 = 44
+        assert_eq!(bbox.height, 44.0);
+    }
+
+    #[test]
+    fn test_calculate_struct_bbox_empty() {
+        let bbox = SyntheticStructureGenerator::calculate_struct_bbox(&[]);
+        assert_eq!(bbox.x, 0.0);
+        assert_eq!(bbox.width, 0.0);
+    }
+
+    #[test]
+    fn test_calculate_struct_bbox_multiple() {
+        let rects = vec![
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            Rect::new(50.0, 30.0, 120.0, 40.0),
+        ];
+        let bbox = SyntheticStructureGenerator::calculate_struct_bbox(&rects);
+        assert_eq!(bbox.x, 0.0);
+        assert_eq!(bbox.y, 0.0);
+        // max_x = max(100, 170) = 170
+        assert_eq!(bbox.width, 170.0);
+        // max_y = max(50, 70) = 70
+        assert_eq!(bbox.height, 70.0);
+    }
+
+    #[test]
+    fn test_many_close_elements() {
+        let generator = SyntheticStructureGenerator::new();
+        let page_bbox = Rect::new(0.0, 0.0, 595.0, 842.0);
+        // 10 elements very close together (should all be in one paragraph)
+        let elements: Vec<ContentElement> = (0..10)
+            .map(|i| {
+                make_text_element(&format!("Line {}", i), 10.0, 100.0 + i as f32 * 1.0, 200.0, 12.0)
+            })
+            .collect();
+        let result = generator.generate(&elements, page_bbox).unwrap();
+        assert_eq!(result.structure_type, "Document");
+        assert!(!result.children.is_empty());
+    }
+
+    #[test]
+    fn test_custom_high_paragraph_gap() {
+        let config = SyntheticStructureConfig {
+            paragraph_gap_threshold: 1000.0, // Very high - everything in one paragraph
+            heading_size_multiplier: 1.3,
+            section_break_threshold: 50.0,
+        };
+        let generator = SyntheticStructureGenerator::with_config(config);
+        let page_bbox = Rect::new(0.0, 0.0, 595.0, 842.0);
+        let elements = vec![
+            make_text_element("Far 1", 10.0, 100.0, 200.0, 12.0),
+            make_text_element("Far 2", 10.0, 500.0, 200.0, 12.0),
+        ];
+        let result = generator.generate(&elements, page_bbox).unwrap();
+        assert_eq!(result.structure_type, "Document");
+    }
+
+    #[test]
+    fn test_is_heading_paragraph_returns_false() {
+        // The placeholder always returns false
+        let generator = SyntheticStructureGenerator::new();
+        let para = StructureElement {
+            structure_type: "P".to_string(),
+            bbox: Rect::new(0.0, 0.0, 100.0, 12.0),
+            children: Vec::new(),
+            reading_order: None,
+            alt_text: None,
+            language: None,
+        };
+        assert!(!generator.is_heading_paragraph(&para));
     }
 }

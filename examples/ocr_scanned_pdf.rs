@@ -1,29 +1,42 @@
 //! OCR text extraction from scanned PDFs.
 //!
 //! This example demonstrates how to extract text from scanned PDFs using
-//! PaddleOCR PP-OCRv5 models via ONNX Runtime.
+//! PaddleOCR models via ONNX Runtime.
 //!
-//! # Prerequisites
+//! # Model Setup
 //!
-//! Download the PaddleOCR models:
-//! - `en_PP-OCRv5_det_infer.onnx` - Text detection model
-//! - `en_PP-OCRv5_rec_infer.onnx` - Text recognition model
-//! - `en_dict.txt` - Character dictionary
+//! Download models with: `./scripts/setup_ocr_models.sh`
+//!
+//! Or manually download the recommended combination (V4 det + V5 rec):
+//! - Detection: ch_PP-OCRv4_det from https://huggingface.co/deepghs/paddleocr
+//! - Recognition: en_PP-OCRv5_mobile_rec from https://huggingface.co/monkt/paddleocr-onnx
+//! - Dictionary: PP-OCRv5 English dict (add space as last line)
 //!
 //! # Usage
 //!
 //! ```bash
 //! cargo run --features ocr --example ocr_scanned_pdf -- \
 //!     --pdf scanned.pdf \
-//!     --det models/en_PP-OCRv5_det_infer.onnx \
-//!     --rec models/en_PP-OCRv5_rec_infer.onnx \
-//!     --dict models/en_dict.txt
+//!     --det .models/det.onnx \
+//!     --rec .models/rec.onnx \
+//!     --dict .models/en_dict.txt
+//! ```
+//!
+//! For PP-OCRv5 full stack (v5 detection + v5 recognition), add `--v5`:
+//!
+//! ```bash
+//! cargo run --features ocr --example ocr_scanned_pdf -- \
+//!     --pdf scanned.pdf \
+//!     --det .models/v5/det.onnx \
+//!     --rec .models/v5/rec.onnx \
+//!     --dict .models/v5/en_dict.txt \
+//!     --v5
 //! ```
 
 #[cfg(feature = "ocr")]
 use pdf_oxide::document::PdfDocument;
 #[cfg(feature = "ocr")]
-use pdf_oxide::ocr::{self, OcrConfigBuilder, OcrEngine, OcrExtractOptions};
+use pdf_oxide::ocr::{self, OcrConfig, OcrEngine, OcrExtractOptions};
 #[cfg(feature = "ocr")]
 use std::env;
 
@@ -53,6 +66,7 @@ fn run_ocr() -> Result<(), Box<dyn std::error::Error>> {
     let mut rec_model = None;
     let mut dict_path = None;
     let mut dpi = 300.0f32;
+    let mut use_v5 = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -81,6 +95,10 @@ fn run_ocr() -> Result<(), Box<dyn std::error::Error>> {
                     .map_err(|_| "Invalid --dpi value")?;
                 i += 2;
             },
+            "--v5" => {
+                use_v5 = true;
+                i += 1;
+            },
             "--help" | "-h" => {
                 print_usage(&args[0]);
                 return Ok(());
@@ -99,12 +117,12 @@ fn run_ocr() -> Result<(), Box<dyn std::error::Error>> {
     let dict_path = dict_path.ok_or("Missing required --dict argument")?;
 
     // Configure OCR
-    let config = OcrConfigBuilder::new()
-        .det_threshold(0.3)
-        .box_threshold(0.5)
-        .rec_threshold(0.5)
-        .num_threads(4)
-        .build();
+    let config = if use_v5 {
+        println!("Using PP-OCRv5 config (high-resolution detection input)");
+        OcrConfig::v5()
+    } else {
+        OcrConfig::default()
+    };
 
     println!("Loading OCR models...");
     let engine = OcrEngine::new(&det_model, &rec_model, &dict_path, config)?;
@@ -154,11 +172,19 @@ Required arguments:
 
 Optional arguments:
     --dpi <NUMBER>   DPI for coordinate conversion (default: 300)
+    --v5             Use PP-OCRv5 config (high-res detection input)
     --help, -h       Show this help message
 
-Example:
-    {} --pdf scanned.pdf --det det.onnx --rec rec.onnx --dict en_dict.txt
+Model recommendations:
+    Best quality:  V4 detection + V5 recognition (default config)
+    Full V5 stack: V5 detection + V5 recognition (use --v5 flag)
+
+Example (recommended V4 det + V5 rec):
+    {} --pdf scanned.pdf --det .models/det.onnx --rec .models/rec.onnx --dict .models/en_dict.txt
+
+Example (full V5):
+    {} --pdf scanned.pdf --det .models/v5/det.onnx --rec .models/v5/rec.onnx --dict .models/v5/en_dict.txt --v5
 "#,
-        program, program
+        program, program, program
     );
 }

@@ -296,9 +296,160 @@ impl TextPostProcessor {
         matches!(ch, ')' | ']' | '}' | '>' | '-' | ',' | '.' | ':' | ';' | '\'' | '"')
     }
 
+    /// Repair broken ligatures from PDFs with corrupt ToUnicode CMaps.
+    ///
+    /// Some LaTeX-generated PDFs have broken ToUnicode CMaps that map ligature
+    /// glyphs (fi, fl, ff, ffi, ffl) to incorrect characters. Common mappings:
+    ///
+    /// - `ff` → `!` (e.g., "di!erent" → "different")
+    /// - `ffi` → `"` (e.g., 'o"ces' → "offices")
+    /// - `fi` → `#` (e.g., "#nancial" → "financial")
+    /// - `fl` → `$` (e.g., "$oor" → "floor")
+    /// - `ffl` → `%` (e.g., "ba%e" → "baffle")
+    ///
+    /// The heuristic: these characters only represent broken ligatures when
+    /// surrounded by letters (not at word boundaries, sentence starts, or in
+    /// natural punctuation contexts).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pdf_oxide::converters::text_post_processor::TextPostProcessor;
+    ///
+    /// assert_eq!(TextPostProcessor::repair_ligatures("di!erent"), "different");
+    /// assert_eq!(TextPostProcessor::repair_ligatures("Hello!"), "Hello!");
+    /// ```
+    pub fn repair_ligatures(text: &str) -> String {
+        let chars: Vec<char> = text.chars().collect();
+        let len = chars.len();
+        if len == 0 {
+            return String::new();
+        }
+
+        let mut result = String::with_capacity(text.len());
+        let mut i = 0;
+
+        while i < len {
+            let ch = chars[i];
+
+            // Check for potential broken ligature characters
+            let replacement = match ch {
+                '!' => Some("ff"),
+                '"' => Some("ffi"),
+                '#' => Some("fi"),
+                '$' => Some("fl"),
+                '%' => Some("ffl"),
+                _ => None,
+            };
+
+            if let Some(lig) = replacement {
+                // Only replace if surrounded by lowercase letters — this avoids
+                // false positives on "C#", "$var", "100%", etc. Broken ligatures
+                // from LaTeX PDFs always appear mid-word between lowercase chars.
+                let prev_is_lower = i > 0 && chars[i - 1].is_lowercase();
+                let next_is_lower = i + 1 < len && chars[i + 1].is_lowercase();
+
+                if prev_is_lower && next_is_lower {
+                    result.push_str(lig);
+                } else {
+                    result.push(ch);
+                }
+            } else {
+                result.push(ch);
+            }
+
+            i += 1;
+        }
+
+        result
+    }
+
+    /// Normalize leader dots in TOC-style lines.
+    ///
+    /// Collapses long runs of dots (or dot-like characters) into a short leader
+    /// sequence ("...") to produce cleaner text output. This handles common TOC
+    /// formatting where sections are connected to page numbers by dot leaders:
+    ///
+    /// Input:  "Section 1 ..................... 5"
+    /// Output: "Section 1 ... 5"
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pdf_oxide::converters::text_post_processor::TextPostProcessor;
+    ///
+    /// let input = "Introduction .................. 5";
+    /// let output = TextPostProcessor::normalize_leader_dots(input);
+    /// assert_eq!(output, "Introduction ... 5");
+    /// ```
+    pub fn normalize_leader_dots(text: &str) -> String {
+        let mut result = String::with_capacity(text.len());
+
+        for (line_idx, line) in text.lines().enumerate() {
+            if line_idx > 0 {
+                result.push('\n');
+            }
+
+            let chars: Vec<char> = line.chars().collect();
+            let len = chars.len();
+            let mut i = 0;
+
+            while i < len {
+                if Self::is_leader_dot(chars[i]) {
+                    let run_start = i;
+                    while i < len && Self::is_leader_dot(chars[i]) {
+                        i += 1;
+                    }
+                    let run_len = i - run_start;
+
+                    if run_len >= 4 {
+                        if !result.ends_with(' ') {
+                            result.push(' ');
+                        }
+                        result.push_str("...");
+
+                        while i < len && chars[i] == ' ' {
+                            i += 1;
+                        }
+
+                        if i < len {
+                            result.push(' ');
+                        }
+                    } else {
+                        for c in &chars[run_start..i] {
+                            result.push(*c);
+                        }
+                    }
+                } else {
+                    result.push(chars[i]);
+                    i += 1;
+                }
+            }
+        }
+
+        if text.ends_with('\n') && !result.ends_with('\n') {
+            result.push('\n');
+        }
+
+        result
+    }
+
+    /// Check if a character is a dot-like leader character.
+    pub fn is_leader_dot(ch: char) -> bool {
+        matches!(
+            ch,
+            '.'    // U+002E FULL STOP
+            | '·'  // U+00B7 MIDDLE DOT
+            | '․'  // U+2024 ONE DOT LEADER
+            | '‥'  // U+2025 TWO DOT LEADER
+            | '…' // U+2026 HORIZONTAL ELLIPSIS
+        )
+    }
+
     /// Apply full text post-processing pipeline.
     ///
-    /// Applies hyphenation removal, whitespace normalization, and special character spacing in sequence.
+    /// Applies ligature repair, hyphenation removal, whitespace normalization,
+    /// leader dot normalization, and special character spacing in sequence.
     ///
     /// # Arguments
     ///
@@ -308,9 +459,11 @@ impl TextPostProcessor {
     ///
     /// Fully processed text with improved extraction quality
     pub fn process(text: &str) -> String {
-        let hyphenated_fixed = Self::rejoin_hyphenated_words(text);
+        let ligatures_fixed = Self::repair_ligatures(text);
+        let hyphenated_fixed = Self::rejoin_hyphenated_words(&ligatures_fixed);
         let whitespace_normalized = Self::normalize_whitespace(&hyphenated_fixed);
-        Self::ensure_special_char_spacing(&whitespace_normalized)
+        let leaders_normalized = Self::normalize_leader_dots(&whitespace_normalized);
+        Self::ensure_special_char_spacing(&leaders_normalized)
     }
 }
 
@@ -532,6 +685,79 @@ mod tests {
         assert!(output.contains("α"));
     }
 
+    // ===== Ligature Repair Tests =====
+
+    #[test]
+    fn test_repair_ligatures_ff() {
+        // ! → ff
+        assert_eq!(TextPostProcessor::repair_ligatures("di!erent"), "different");
+        assert_eq!(TextPostProcessor::repair_ligatures("e!ect"), "effect");
+    }
+
+    #[test]
+    fn test_repair_ligatures_ffi() {
+        // " → ffi (between letters)
+        assert_eq!(TextPostProcessor::repair_ligatures("o\"ces"), "offices");
+        assert_eq!(TextPostProcessor::repair_ligatures("e\"cient"), "efficient");
+    }
+
+    #[test]
+    fn test_repair_ligatures_fi() {
+        // # → fi
+        assert_eq!(TextPostProcessor::repair_ligatures("#nancial"), "#nancial"); // start of text — not a ligature
+        assert_eq!(TextPostProcessor::repair_ligatures("de#ne"), "define");
+        assert_eq!(TextPostProcessor::repair_ligatures("bene#t"), "benefit");
+    }
+
+    #[test]
+    fn test_repair_ligatures_fl() {
+        // $ → fl
+        assert_eq!(TextPostProcessor::repair_ligatures("$oor"), "$oor"); // start of text
+        assert_eq!(TextPostProcessor::repair_ligatures("re$ect"), "reflect");
+    }
+
+    #[test]
+    fn test_repair_ligatures_ffl() {
+        // % → ffl
+        assert_eq!(TextPostProcessor::repair_ligatures("ba%e"), "baffle");
+        assert_eq!(TextPostProcessor::repair_ligatures("ra%e"), "raffle");
+    }
+
+    #[test]
+    fn test_repair_ligatures_preserves_punctuation() {
+        // ! at end of sentence — not a ligature
+        assert_eq!(TextPostProcessor::repair_ligatures("Hello!"), "Hello!");
+        // ! at start of word — not a ligature
+        assert_eq!(TextPostProcessor::repair_ligatures("!important"), "!important");
+        // " as quote at word boundary
+        assert_eq!(TextPostProcessor::repair_ligatures("He said \"hello\""), "He said \"hello\"");
+        // # at start
+        assert_eq!(TextPostProcessor::repair_ligatures("#hashtag"), "#hashtag");
+        // $ as currency
+        assert_eq!(TextPostProcessor::repair_ligatures("$100"), "$100");
+        // % as percent
+        assert_eq!(TextPostProcessor::repair_ligatures("100%"), "100%");
+    }
+
+    #[test]
+    fn test_repair_ligatures_multiple() {
+        assert_eq!(
+            TextPostProcessor::repair_ligatures("the di!erent o\"ces"),
+            "the different offices"
+        );
+    }
+
+    #[test]
+    fn test_repair_ligatures_empty() {
+        assert_eq!(TextPostProcessor::repair_ligatures(""), "");
+    }
+
+    #[test]
+    fn test_repair_ligatures_no_changes() {
+        let input = "normal text without broken ligatures";
+        assert_eq!(TextPostProcessor::repair_ligatures(input), input);
+    }
+
     #[test]
     fn test_is_special_character_greek_letters() {
         assert!(TextPostProcessor::is_special_character('α'));
@@ -566,5 +792,72 @@ mod tests {
         assert!(TextPostProcessor::is_space_after_special(','));
         assert!(TextPostProcessor::is_space_after_special('.'));
         assert!(TextPostProcessor::is_space_after_special(')'));
+    }
+
+    // ===== Tests for Leader Dot Normalization (Issue #104) =====
+
+    #[test]
+    fn test_normalize_leader_dots_basic() {
+        assert_eq!(
+            TextPostProcessor::normalize_leader_dots("Introduction .................. 5"),
+            "Introduction ... 5"
+        );
+    }
+
+    #[test]
+    fn test_normalize_leader_dots_multiple_lines() {
+        let input = "Chapter 1.......10\nChapter 2.......25\nChapter 3.......40";
+        let output = TextPostProcessor::normalize_leader_dots(input);
+        assert_eq!(output, "Chapter 1 ... 10\nChapter 2 ... 25\nChapter 3 ... 40");
+    }
+
+    #[test]
+    fn test_normalize_leader_dots_short_preserved() {
+        assert_eq!(
+            TextPostProcessor::normalize_leader_dots("e.g. this is normal"),
+            "e.g. this is normal"
+        );
+        assert_eq!(TextPostProcessor::normalize_leader_dots("wait for it..."), "wait for it...");
+    }
+
+    #[test]
+    fn test_normalize_leader_dots_unicode() {
+        assert_eq!(
+            TextPostProcessor::normalize_leader_dots("Section 1 ···················· 5"),
+            "Section 1 ... 5"
+        );
+        assert_eq!(
+            TextPostProcessor::normalize_leader_dots("Section 1 ․․․․․․․․ 5"),
+            "Section 1 ... 5"
+        );
+    }
+
+    #[test]
+    fn test_normalize_leader_dots_empty() {
+        assert_eq!(TextPostProcessor::normalize_leader_dots(""), "");
+    }
+
+    #[test]
+    fn test_normalize_leader_dots_no_trailing_content() {
+        assert_eq!(
+            TextPostProcessor::normalize_leader_dots("Section 1 ............"),
+            "Section 1 ..."
+        );
+    }
+
+    #[test]
+    fn test_normalize_leader_dots_preserves_version_numbers() {
+        assert_eq!(
+            TextPostProcessor::normalize_leader_dots("Version 1.2.3 is released"),
+            "Version 1.2.3 is released"
+        );
+    }
+
+    #[test]
+    fn test_process_pipeline_includes_leader_dots() {
+        let input = "Chapter 1 .................. 5";
+        let output = TextPostProcessor::process(input);
+        assert!(output.contains("..."));
+        assert!(!output.contains(".................."));
     }
 }

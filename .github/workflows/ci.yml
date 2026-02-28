@@ -147,7 +147,25 @@ jobs:
       - name: Test Python bindings
         run: uv run python -c "import pdf_oxide; print(pdf_oxide.VERSION)"
 
-  # Code coverage (only on main branch to save CI time)
+  # WASM build check
+  wasm-build:
+    name: WASM Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build WASM
+        run: cargo build --lib --target wasm32-unknown-unknown --features wasm
+
+  # Code coverage with enforcement
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
@@ -157,24 +175,32 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - name: Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Install tarpaulin
-        run: |
-          curl -Lo tarpaulin.tar.gz https://github.com/xd009642/tarpaulin/releases/latest/download/cargo-tarpaulin-x86_64-unknown-linux-gnu.tar.gz
-          tar xzf tarpaulin.tar.gz
-          mv cargo-tarpaulin ~/.cargo/bin/
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Generate coverage
-        run: cargo tarpaulin --lib --skip-clean --timeout 300 --out xml --exclude-files "tests/*" || true
-        continue-on-error: true
+        run: |
+          cargo llvm-cov --lib --tests --lcov --output-path lcov.info \
+            --ignore-filename-regex '(cid_mappings/|adobe_glyph_list\.rs|python\.rs|wasm\.rs|ocr/|rendering/|bin/)'
+
+      - name: Enforce 85% coverage threshold
+        run: |
+          cargo llvm-cov report \
+            --ignore-filename-regex '(cid_mappings/|adobe_glyph_list\.rs|python\.rs|wasm\.rs|ocr/|rendering/|bin/)' \
+            --fail-under-lines 85
 
       - name: Upload coverage to Codecov
+        if: always()
         uses: codecov/codecov-action@v5
         with:
-          files: ./cobertura.xml
+          files: ./lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
   # Benchmark smoke test

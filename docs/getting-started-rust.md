@@ -29,6 +29,9 @@ pdf_oxide = { version = "0.3", features = ["office"] }
 # With digital signatures
 pdf_oxide = { version = "0.3", features = ["signatures"] }
 
+# With OCR for scanned PDFs (PaddleOCR via ONNX Runtime)
+pdf_oxide = { version = "0.3", features = ["ocr"] }
+
 # With page rendering to images
 pdf_oxide = { version = "0.3", features = ["rendering"] }
 
@@ -206,7 +209,66 @@ pdf.add_link(0, [100.0, 600.0, 200.0, 620.0], "https://example.com")?;
 pdf.save("annotated.pdf")?;
 ```
 
-### Adding Form Fields
+### Working with Form Fields
+
+Extract, read, fill, and save PDF form fields (AcroForm):
+
+```rust
+use pdf_oxide::PdfDocument;
+use pdf_oxide::extractors::forms::FormExtractor;
+
+let mut doc = PdfDocument::open("tax-form.pdf")?;
+
+// List all form fields
+let fields = FormExtractor::extract_fields(&mut doc)?;
+for f in &fields {
+    println!("{} ({:?}) = {:?}", f.full_name, f.field_type, f.value);
+}
+```
+
+#### Fill Form Fields and Save
+
+```rust
+use pdf_oxide::editor::{DocumentEditor, EditableDocument, SaveOptions};
+use pdf_oxide::editor::form_fields::FormFieldValue;
+
+let mut editor = DocumentEditor::open("w2.pdf")?;
+
+// Set text values
+editor.set_form_field_value("employee_name", FormFieldValue::Text("Jane Doe".into()))?;
+editor.set_form_field_value("wages", FormFieldValue::Text("85000.00".into()))?;
+
+// Set checkbox
+editor.set_form_field_value("retirement_plan", FormFieldValue::Boolean(true))?;
+
+// Save with incremental update (preserves original, appends changes)
+editor.save_with_options("filled_w2.pdf", SaveOptions::incremental())?;
+```
+
+#### Extract Text with Filled Values
+
+Filled values appear inline in `extract_text` and `to_markdown`:
+
+```rust
+use pdf_oxide::PdfDocument;
+use pdf_oxide::converters::ConversionOptions;
+
+let mut doc = PdfDocument::open("filled_w2.pdf")?;
+
+// Form values appear where the fields are positioned
+let text = doc.extract_text(0)?;
+println!("{}", text); // "Jane Doe" appears inline
+
+// Include form fields in Markdown (default)
+let opts = ConversionOptions { include_form_fields: true, ..Default::default() };
+let md = doc.to_markdown(0, &opts)?;
+
+// Exclude form fields
+let opts_off = ConversionOptions { include_form_fields: false, ..Default::default() };
+let md_clean = doc.to_markdown(0, &opts_off)?;
+```
+
+#### Adding New Form Fields
 
 ```rust
 use pdf_oxide::api::Pdf;
@@ -292,6 +354,97 @@ if result.is_compliant {
 let converter = PdfAConverter::new(PdfALevel::PdfA2b);
 converter.convert("input.pdf", "archive.pdf")?;
 ```
+
+## OCR - Extracting Text from Scanned PDFs
+
+> For a comprehensive guide covering model selection, configuration reference, resize strategies, and troubleshooting, see the [OCR Guide](OCR_GUIDE.md).
+
+PDFOxide can extract text from scanned PDFs using PaddleOCR models via ONNX Runtime. Enable the `ocr` feature:
+
+```toml
+[dependencies]
+pdf_oxide = { version = "0.3", features = ["ocr"] }
+```
+
+### Model Setup
+
+PDFOxide supports PaddleOCR v3, v4, and v5 models. You can mix detection and recognition models from different versions.
+
+**Quick start** — download the recommended models:
+
+```bash
+./scripts/setup_ocr_models.sh
+```
+
+#### Model Selection Guide
+
+| Combination | Detection | Recognition | English Accuracy | Total Size |
+|---|---|---|---|---|
+| **V4 det + V5 rec (recommended)** | ch_PP-OCRv4_det | en_PP-OCRv5_mobile_rec | Best | ~12.5 MB |
+| V4 det + V4 rec | ch_PP-OCRv4_det | en_PP-OCRv4_rec | Good | ~12.4 MB |
+| V5 det + V5 rec | PP-OCRv5_server_det | en_PP-OCRv5_mobile_rec | Good (different errors) | ~96 MB |
+| V3 det + V3 rec | en_PP-OCRv3_det | en_PP-OCRv3_rec | Fair | ~11 MB |
+
+The **V4 detection + V5 recognition** combination gives the best results for English documents: V4 detection reliably segments text lines, while V5 recognition has the highest character-level accuracy.
+
+**Manual download:**
+
+```bash
+# Recommended: V4 detection + V5 recognition
+# Detection (4.7 MB):
+curl -L https://huggingface.co/deepghs/paddleocr/resolve/main/det/ch_PP-OCRv4_det/model.onnx -o .models/det.onnx
+
+# Recognition (7.8 MB):
+curl -L https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/english/rec.onnx -o .models/rec.onnx
+
+# Dictionary (must include space as last entry):
+curl -L https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/english/dict.txt -o .models/en_dict.txt
+echo " " >> .models/en_dict.txt
+```
+
+### Basic OCR Usage
+
+```rust
+use pdf_oxide::PdfDocument;
+use pdf_oxide::ocr::{OcrEngine, OcrConfig, OcrExtractOptions, needs_ocr};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create OCR engine (reuse across pages)
+    let engine = OcrEngine::new(
+        ".models/det.onnx",
+        ".models/rec.onnx",
+        ".models/en_dict.txt",
+        OcrConfig::default(),
+    )?;
+
+    let mut doc = PdfDocument::open("scanned.pdf")?;
+    let options = OcrExtractOptions::with_dpi(300.0);
+
+    for page in 0..doc.page_count()? {
+        if needs_ocr(&mut doc, page)? {
+            let text = pdf_oxide::ocr::ocr_page(&mut doc, page, &engine, &options)?;
+            println!("Page {} (OCR): {}", page + 1, text);
+        } else {
+            let text = doc.extract_text(page)?;
+            println!("Page {} (native): {}", page + 1, text);
+        }
+    }
+
+    Ok(())
+}
+```
+
+### Using PP-OCRv5 Detection
+
+If you use the full PP-OCRv5 stack (v5 detection + v5 recognition), use `OcrConfig::v5()` which preserves the original image resolution instead of downscaling to 960px:
+
+```rust
+// For PP-OCRv5 server detection model (88 MB)
+let config = OcrConfig::v5();
+let engine = OcrEngine::new("v5_det.onnx", "v5_rec.onnx", "v5_dict.txt", config)?;
+```
+
+> **Note:** ONNX Runtime (`libonnxruntime.so` v1.23+) must be available at runtime. Set `ORT_LIB_LOCATION` to the directory containing the shared library during build, or install the ONNX Runtime system package. You can also set `ORT_PREFER_DYNAMIC_LINK=1` to link dynamically.
 
 ## Lower-Level APIs
 

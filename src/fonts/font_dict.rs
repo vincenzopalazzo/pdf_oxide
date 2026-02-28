@@ -40,10 +40,14 @@ pub struct FontInfo {
     /// Embedded TrueType font data (from FontFile2 stream)
     /// Shared via Arc to avoid expensive cloning
     pub embedded_font_data: Option<Arc<Vec<u8>>>,
-    /// Extracted TrueType cmap table (GID to Unicode mappings)
-    /// Used as fallback when ToUnicode CMap is missing
-    /// Phase 2A: Provides 70-80% recovery for Type0 fonts without ToUnicode
-    pub truetype_cmap: Option<TrueTypeCMap>,
+    /// Lazily-extracted TrueType cmap table (GID to Unicode mappings).
+    /// Used as fallback when ToUnicode CMap is missing.
+    /// Initialized on first access via `truetype_cmap()` accessor to avoid
+    /// the 10-25ms per-font extraction cost when ToUnicode resolves all chars.
+    pub truetype_cmap: std::sync::OnceLock<Option<TrueTypeCMap>>,
+    /// Whether this font has an embedded TrueType font (FontFile2).
+    /// Controls whether lazy truetype_cmap extraction is attempted.
+    pub is_truetype_font: bool,
     /// CID to GID mapping (Type0 fonts only, Phase 3)
     /// Converts Character IDs in the PDF to Glyph IDs in the embedded font
     /// Used to look up Unicode values via the TrueType cmap table
@@ -164,6 +168,56 @@ pub struct CIDSystemInfo {
 }
 
 impl FontInfo {
+    /// Get the TrueType cmap, lazily extracting it on first access.
+    /// Returns `None` if the font is not TrueType or has no embedded data.
+    pub fn truetype_cmap(&self) -> Option<&TrueTypeCMap> {
+        self.truetype_cmap
+            .get_or_init(|| {
+                if !self.is_truetype_font {
+                    return None;
+                }
+                let font_data = self.embedded_font_data.as_ref()?;
+                if font_data.is_empty() {
+                    return None;
+                }
+                match TrueTypeCMap::from_font_data(font_data) {
+                    Ok(cmap) if !cmap.is_empty() => {
+                        log::info!(
+                            "Lazy-extracted TrueType cmap for font '{}': {} mappings",
+                            self.base_font,
+                            cmap.len()
+                        );
+                        Some(cmap)
+                    },
+                    Ok(_) => None,
+                    Err(e) => {
+                        log::warn!(
+                            "Font '{}': TrueType cmap extraction failed: {}",
+                            self.base_font,
+                            e
+                        );
+                        None
+                    },
+                }
+            })
+            .as_ref()
+    }
+
+    /// Set the TrueType cmap directly (used by share_truetype_cmaps and tests).
+    pub fn set_truetype_cmap(&mut self, cmap: Option<TrueTypeCMap>) {
+        self.truetype_cmap = std::sync::OnceLock::new();
+        if let Some(c) = cmap {
+            let _ = self.truetype_cmap.set(Some(c));
+        } else {
+            let _ = self.truetype_cmap.set(None);
+        }
+    }
+
+    /// Check if a TrueType cmap is available (either already extracted or extractable).
+    pub fn has_truetype_cmap(&self) -> bool {
+        self.truetype_cmap().is_some()
+    }
+
     /// Parse font information from a font dictionary object.
     ///
     /// # Arguments
@@ -327,65 +381,10 @@ impl FontInfo {
                 (None, None, None, None, false)
             };
 
-        // ===== NEW: Extract TrueType cmap if available (Phase 2A) =====
-        let truetype_cmap = if is_truetype_font {
-            // Only attempt TrueType cmap extraction for actual TrueType fonts (FontFile2)
-            // CFF/OpenType fonts (FontFile3) do NOT have TrueType cmaps - they have different structures
-            if let Some(font_data) = &embedded_font_data {
-                log::info!(
-                    "Font '{}': Attempting to extract TrueType cmap from {} byte embedded TrueType font data",
-                    base_font,
-                    font_data.len()
-                );
-                match TrueTypeCMap::from_font_data(font_data) {
-                    Ok(cmap) => {
-                        let glyph_count = cmap.len();
-                        if glyph_count > 0 {
-                            log::info!(
-                                "✓ Successfully extracted TrueType cmap for font '{}': {} glyph→Unicode mappings",
-                                base_font,
-                                glyph_count
-                            );
-                        } else {
-                            log::warn!(
-                                "Font '{}': TrueType cmap extracted but contains 0 mappings (empty cmap)",
-                                base_font
-                            );
-                        }
-                        Some(cmap)
-                    },
-                    Err(e) => {
-                        log::warn!("Font '{}': TrueType cmap extraction failed: {}", base_font, e);
-                        None
-                    },
-                }
-            } else {
-                log::debug!(
-                    "Font '{}': No embedded font data available for TrueType cmap extraction",
-                    base_font
-                );
-                None
-            }
-        } else if embedded_font_data.is_some() {
-            // Embedded font exists but it's NOT TrueType (e.g., CFF/OpenType)
-            log::debug!(
-                "Font '{}': Skipping TrueType cmap extraction - font is {} (not TrueType)",
-                base_font,
-                if subtype == "Type0" {
-                    "Type0 with CFF/OpenType"
-                } else {
-                    "other format"
-                }
-            );
-            None
-        } else {
-            log::debug!(
-                "Font '{}': No embedded font data available for TrueType cmap extraction",
-                base_font
-            );
-            None
-        };
-        // ===== END NEW CODE =====
+        // TrueType cmap extraction is now LAZY — deferred until first access via
+        // truetype_cmap() accessor. This saves 10-25ms per font when ToUnicode CMap
+        // (Priority 1) resolves all characters, making the cmap unnecessary.
+        // The is_truetype_font flag is recorded here for the lazy accessor to use.
 
         // Helper function to check if font is symbolic (bit 3 set)
         let is_symbolic_font = |flags_opt: Option<i32>| -> bool {
@@ -656,8 +655,12 @@ impl FontInfo {
             (None, None, None, None, 1000.0, None)
         };
 
-        // Use descendant's TrueType cmap when the parent has none
-        let truetype_cmap = truetype_cmap.or(descendant_tt_cmap);
+        // Pre-populate OnceLock with descendant's TrueType cmap if available.
+        // Otherwise leave it for lazy extraction from embedded_font_data.
+        let truetype_cmap_lock = std::sync::OnceLock::new();
+        if let Some(desc_cmap) = descendant_tt_cmap {
+            let _ = truetype_cmap_lock.set(Some(desc_cmap));
+        }
 
         Ok(FontInfo {
             base_font,
@@ -668,7 +671,8 @@ impl FontInfo {
             flags,
             stem_v,
             embedded_font_data,
-            truetype_cmap,
+            truetype_cmap: truetype_cmap_lock,
+            is_truetype_font,
             cid_to_gid_map,
             cid_system_info,
             cid_font_type,
@@ -1938,7 +1942,7 @@ impl FontInfo {
 
                         if is_identity_ordering {
                             // Try TrueType cmap: CID → GID → Unicode
-                            if let Some(ref tt_cmap) = self.truetype_cmap {
+                            if let Some(tt_cmap) = self.truetype_cmap() {
                                 let gid = if let Some(ref cid_to_gid) = self.cid_to_gid_map {
                                     cid_to_gid.get_gid(char_code as u16)
                                 } else {
@@ -2178,7 +2182,7 @@ impl FontInfo {
                 if (self.subtype == "TrueType" || self.subtype == "Type1")
                     && name == "StandardEncoding"
                 {
-                    if let Some(ref tt_cmap) = self.truetype_cmap {
+                    if let Some(tt_cmap) = self.truetype_cmap() {
                         if let Some(unicode_char) = tt_cmap.get_unicode(char_code as u16) {
                             return Some(unicode_char.to_string());
                         }
@@ -2234,7 +2238,7 @@ impl FontInfo {
                     // conforming readers SHALL use the TrueType font's internal "cmap" table as fallback.
                     // This requires translating CID → GID via the CIDToGIDMap, then looking up Unicode.
 
-                    if let Some(ref tt_cmap) = self.truetype_cmap {
+                    if let Some(tt_cmap) = self.truetype_cmap() {
                         // Translate CID → GID using the CIDToGIDMap
                         // Note: CIDToGIDMap only works with u16 CIDs (2-byte codes)
                         // For CIDs > 0xFFFF, we skip CIDToGIDMap and use char_code as GID if it fits in u16
@@ -2378,7 +2382,7 @@ impl FontInfo {
         // resort. For subset fonts, character codes may be GIDs that the encoding table
         // doesn't cover. The cmap provides GID → Unicode mapping.
         if self.subtype != "Type0" {
-            if let Some(ref tt_cmap) = self.truetype_cmap {
+            if let Some(tt_cmap) = self.truetype_cmap() {
                 if let Some(unicode_char) = tt_cmap.get_unicode(char_code as u16) {
                     return Some(unicode_char.to_string());
                 }
@@ -3714,7 +3718,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -3739,7 +3744,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -3767,7 +3773,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -3792,7 +3799,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -3823,7 +3831,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -3855,7 +3864,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -3886,7 +3896,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -3915,7 +3926,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4042,7 +4054,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4159,7 +4172,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4194,7 +4208,8 @@ mod tests {
             flags: Some(0x80000), // ForceBold flag set
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4222,7 +4237,8 @@ mod tests {
             flags: Some(0x40000), // Different flag, NOT ForceBold
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4254,7 +4270,8 @@ mod tests {
             flags: None,
             stem_v: Some(120.0), // Heavy stem
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4282,7 +4299,8 @@ mod tests {
             flags: None,
             stem_v: Some(95.0), // Medium stem
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4310,7 +4328,8 @@ mod tests {
             flags: None,
             stem_v: Some(70.0), // Light stem
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4342,7 +4361,8 @@ mod tests {
             flags: Some(0x80000),   // ForceBold flag set
             stem_v: Some(120.0),    // Heavy stem
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4370,7 +4390,8 @@ mod tests {
             flags: Some(0x80000), // ForceBold flag set
             stem_v: Some(70.0),   // Light stem
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4398,7 +4419,8 @@ mod tests {
             flags: None,
             stem_v: Some(70.0), // Light stem, but name says Bold
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4430,7 +4452,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4457,7 +4480,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4484,7 +4508,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4511,7 +4536,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4538,7 +4564,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4565,7 +4592,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4592,7 +4620,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4619,7 +4648,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4646,7 +4676,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4921,7 +4952,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4960,7 +4992,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -4995,7 +5028,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -5036,7 +5070,8 @@ mod tests {
             flags: None,
             stem_v: None,
             embedded_font_data: None,
-            truetype_cmap: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
             widths: None,
             first_char: None,
             last_char: None,
@@ -5066,5 +5101,1469 @@ mod tests {
 
         // Default for unlisted CIDs
         assert_eq!(font.get_glyph_width(300), 1000.0);
+    }
+
+    // =========================================================================
+    // Helper: create a minimal FontInfo for testing (reduces boilerplate)
+    // =========================================================================
+    fn make_font(overrides: impl FnOnce(&mut FontInfo)) -> FontInfo {
+        let mut f = FontInfo {
+            base_font: "TestFont".to_string(),
+            subtype: "Type1".to_string(),
+            encoding: Encoding::Standard("WinAnsiEncoding".to_string()),
+            to_unicode: None,
+            font_weight: None,
+            flags: None,
+            stem_v: None,
+            embedded_font_data: None,
+            truetype_cmap: std::sync::OnceLock::new(),
+            is_truetype_font: false,
+            widths: None,
+            first_char: None,
+            last_char: None,
+            default_width: 500.0,
+            cid_to_gid_map: None,
+            cid_system_info: None,
+            cid_font_type: None,
+            cid_widths: None,
+            cid_default_width: 1000.0,
+            multi_char_map: HashMap::new(),
+            byte_to_char_table: std::sync::OnceLock::new(),
+            byte_to_width_table: std::sync::OnceLock::new(),
+        };
+        overrides(&mut f);
+        f
+    }
+
+    // =========================================================================
+    // parse_cid_widths — unit tests for the /W array parser
+    // =========================================================================
+
+    #[test]
+    fn test_parse_cid_widths_array_format() {
+        // Format: c [w1 w2 ... wn]
+        let mut dict: HashMap<String, Object> = HashMap::new();
+        dict.insert(
+            "W".to_string(),
+            Object::Array(vec![
+                Object::Integer(10), // start CID
+                Object::Array(vec![
+                    Object::Integer(500),
+                    Object::Integer(600),
+                    Object::Integer(700),
+                ]),
+            ]),
+        );
+        let widths = FontInfo::parse_cid_widths(&dict, "Test").unwrap();
+        assert_eq!(widths.get(&10), Some(&500.0));
+        assert_eq!(widths.get(&11), Some(&600.0));
+        assert_eq!(widths.get(&12), Some(&700.0));
+        assert_eq!(widths.get(&13), None);
+    }
+
+    #[test]
+    fn test_parse_cid_widths_range_format() {
+        // Format: cfirst clast w
+        let mut dict: HashMap<String, Object> = HashMap::new();
+        dict.insert(
+            "W".to_string(),
+            Object::Array(vec![
+                Object::Integer(100),
+                Object::Integer(105),
+                Object::Integer(300),
+            ]),
+        );
+        let widths = FontInfo::parse_cid_widths(&dict, "Test").unwrap();
+        for cid in 100..=105 {
+            assert_eq!(widths.get(&cid), Some(&300.0), "CID {} should be 300", cid);
+        }
+        assert_eq!(widths.get(&106), None);
+    }
+
+    #[test]
+    fn test_parse_cid_widths_mixed_formats() {
+        // Mix array-format and range-format in one /W array
+        let mut dict: HashMap<String, Object> = HashMap::new();
+        dict.insert(
+            "W".to_string(),
+            Object::Array(vec![
+                // Array format
+                Object::Integer(1),
+                Object::Array(vec![Object::Integer(200), Object::Integer(300)]),
+                // Range format
+                Object::Integer(50),
+                Object::Integer(52),
+                Object::Integer(400),
+            ]),
+        );
+        let widths = FontInfo::parse_cid_widths(&dict, "Test").unwrap();
+        assert_eq!(widths.get(&1), Some(&200.0));
+        assert_eq!(widths.get(&2), Some(&300.0));
+        assert_eq!(widths.get(&50), Some(&400.0));
+        assert_eq!(widths.get(&51), Some(&400.0));
+        assert_eq!(widths.get(&52), Some(&400.0));
+    }
+
+    #[test]
+    fn test_parse_cid_widths_real_values() {
+        // Widths specified as Real (float) values
+        let mut dict: HashMap<String, Object> = HashMap::new();
+        dict.insert(
+            "W".to_string(),
+            Object::Array(vec![Object::Integer(5), Object::Array(vec![Object::Real(123.5)])]),
+        );
+        let widths = FontInfo::parse_cid_widths(&dict, "Test").unwrap();
+        assert_eq!(widths.get(&5), Some(&123.5));
+    }
+
+    #[test]
+    fn test_parse_cid_widths_empty_array() {
+        let mut dict: HashMap<String, Object> = HashMap::new();
+        dict.insert("W".to_string(), Object::Array(vec![]));
+        assert!(FontInfo::parse_cid_widths(&dict, "Test").is_none());
+    }
+
+    #[test]
+    fn test_parse_cid_widths_missing_w() {
+        let dict: HashMap<String, Object> = HashMap::new();
+        assert!(FontInfo::parse_cid_widths(&dict, "Test").is_none());
+    }
+
+    #[test]
+    fn test_parse_cid_widths_non_integer_start() {
+        // First element is not an integer — should skip
+        let mut dict: HashMap<String, Object> = HashMap::new();
+        dict.insert(
+            "W".to_string(),
+            Object::Array(vec![
+                Object::Name("bad".to_string()),
+                Object::Integer(10),
+                Object::Array(vec![Object::Integer(500)]),
+            ]),
+        );
+        let widths = FontInfo::parse_cid_widths(&dict, "Test").unwrap();
+        assert_eq!(widths.get(&10), Some(&500.0));
+    }
+
+    #[test]
+    fn test_parse_cid_widths_truncated_range() {
+        // Range format with missing width — should just stop
+        let mut dict: HashMap<String, Object> = HashMap::new();
+        dict.insert(
+            "W".to_string(),
+            Object::Array(vec![
+                Object::Integer(10),
+                Object::Integer(15),
+                // missing width
+            ]),
+        );
+        assert!(FontInfo::parse_cid_widths(&dict, "Test").is_none());
+    }
+
+    #[test]
+    fn test_parse_cid_widths_unexpected_second_element() {
+        // Second element after CID is neither Array nor Integer
+        let mut dict: HashMap<String, Object> = HashMap::new();
+        dict.insert(
+            "W".to_string(),
+            Object::Array(vec![Object::Integer(10), Object::Name("bad".to_string())]),
+        );
+        // Should produce empty widths
+        assert!(FontInfo::parse_cid_widths(&dict, "Test").is_none());
+    }
+
+    #[test]
+    fn test_parse_cid_widths_range_with_bad_width() {
+        // Range format where the width value is not a number
+        let mut dict: HashMap<String, Object> = HashMap::new();
+        dict.insert(
+            "W".to_string(),
+            Object::Array(vec![
+                Object::Integer(1),
+                Object::Integer(3),
+                Object::Name("notanumber".to_string()),
+            ]),
+        );
+        // Bad width for range, should skip and produce no widths
+        assert!(FontInfo::parse_cid_widths(&dict, "Test").is_none());
+    }
+
+    #[test]
+    fn test_parse_cid_widths_range_with_real_width() {
+        let mut dict: HashMap<String, Object> = HashMap::new();
+        dict.insert(
+            "W".to_string(),
+            Object::Array(vec![
+                Object::Integer(10),
+                Object::Integer(12),
+                Object::Real(750.5),
+            ]),
+        );
+        let widths = FontInfo::parse_cid_widths(&dict, "Test").unwrap();
+        assert_eq!(widths.get(&10), Some(&750.5));
+        assert_eq!(widths.get(&11), Some(&750.5));
+        assert_eq!(widths.get(&12), Some(&750.5));
+    }
+
+    // =========================================================================
+    // shift_jis_to_unicode
+    // =========================================================================
+
+    #[test]
+    fn test_shift_jis_single_byte_ascii() {
+        // Single-byte ASCII should decode normally
+        assert_eq!(shift_jis_to_unicode(0x41), Some('A'));
+        assert_eq!(shift_jis_to_unicode(0x20), Some(' '));
+    }
+
+    #[test]
+    fn test_shift_jis_two_byte_katakana() {
+        // 0x8341 is Shift-JIS for katakana "ア" (U+30A2)
+        assert_eq!(shift_jis_to_unicode(0x8341), Some('ア'));
+    }
+
+    #[test]
+    fn test_shift_jis_invalid() {
+        // 0xFFFF is not a valid Shift-JIS sequence
+        assert_eq!(shift_jis_to_unicode(0xFFFF), None);
+    }
+
+    // =========================================================================
+    // standard_encoding_lookup — extended coverage
+    // =========================================================================
+
+    #[test]
+    fn test_standard_encoding_lookup_standard_encoding_ascii() {
+        assert_eq!(standard_encoding_lookup("StandardEncoding", b'A'), Some("A".to_string()));
+        assert_eq!(standard_encoding_lookup("StandardEncoding", b' '), Some(" ".to_string()));
+    }
+
+    #[test]
+    fn test_standard_encoding_lookup_standard_encoding_extended() {
+        // StandardEncoding 0xAE → fi ligature (U+FB01)
+        assert_eq!(
+            standard_encoding_lookup("StandardEncoding", 0xAE),
+            Some("\u{FB01}".to_string())
+        );
+        // 0xD0 → emdash (U+2014)
+        assert_eq!(
+            standard_encoding_lookup("StandardEncoding", 0xD0),
+            Some("\u{2014}".to_string())
+        );
+        // 0xA1 → exclamdown
+        assert_eq!(
+            standard_encoding_lookup("StandardEncoding", 0xA1),
+            Some("\u{00A1}".to_string())
+        );
+    }
+
+    #[test]
+    fn test_standard_encoding_lookup_standard_encoding_unmapped() {
+        // 0x00 is in the control range, outside 32..=126
+        assert_eq!(standard_encoding_lookup("StandardEncoding", 0x00), None);
+        // 0xB0 is not mapped in StandardEncoding
+        assert_eq!(standard_encoding_lookup("StandardEncoding", 0xB0), None);
+    }
+
+    #[test]
+    fn test_standard_encoding_lookup_macroman_ascii() {
+        assert_eq!(standard_encoding_lookup("MacRomanEncoding", b'Z'), Some("Z".to_string()));
+    }
+
+    #[test]
+    fn test_standard_encoding_lookup_macroman_extended() {
+        // 0x80 → Adieresis (U+00C4)
+        assert_eq!(
+            standard_encoding_lookup("MacRomanEncoding", 0x80),
+            Some("\u{00C4}".to_string())
+        );
+        // 0xD0 → endash (U+2013)
+        assert_eq!(
+            standard_encoding_lookup("MacRomanEncoding", 0xD0),
+            Some("\u{2013}".to_string())
+        );
+        // 0xCA → NBSP (U+00A0)
+        assert_eq!(
+            standard_encoding_lookup("MacRomanEncoding", 0xCA),
+            Some("\u{00A0}".to_string())
+        );
+        // 0xF0 → Apple logo (private use U+F8FF)
+        assert_eq!(
+            standard_encoding_lookup("MacRomanEncoding", 0xF0),
+            Some("\u{F8FF}".to_string())
+        );
+    }
+
+    #[test]
+    fn test_standard_encoding_lookup_macroman_unmapped() {
+        // 0x00 is control range
+        assert_eq!(standard_encoding_lookup("MacRomanEncoding", 0x00), None);
+    }
+
+    #[test]
+    fn test_standard_encoding_lookup_winansi_extended() {
+        // 0x80 → Euro sign (U+20AC)
+        assert_eq!(standard_encoding_lookup("WinAnsiEncoding", 0x80), Some("\u{20AC}".to_string()));
+        // 0x96 → En dash (U+2013)
+        assert_eq!(standard_encoding_lookup("WinAnsiEncoding", 0x96), Some("\u{2013}".to_string()));
+        // 0xA0 → NBSP direct ISO-8859-1 mapping
+        assert_eq!(standard_encoding_lookup("WinAnsiEncoding", 0xA0), Some("\u{00A0}".to_string()));
+    }
+
+    #[test]
+    fn test_standard_encoding_lookup_winansi_undefined_holes() {
+        // 0x81 is undefined in WinAnsi/Windows-1252
+        assert_eq!(standard_encoding_lookup("WinAnsiEncoding", 0x81), None);
+        // 0x8D is undefined
+        assert_eq!(standard_encoding_lookup("WinAnsiEncoding", 0x8D), None);
+    }
+
+    #[test]
+    fn test_standard_encoding_lookup_pdfdoc() {
+        // 0x80 → bullet (U+2022)
+        assert_eq!(standard_encoding_lookup("PDFDocEncoding", 0x80), Some("\u{2022}".to_string()));
+        // 0x84 → emdash (U+2014)
+        assert_eq!(standard_encoding_lookup("PDFDocEncoding", 0x84), Some("\u{2014}".to_string()));
+        // ASCII range
+        assert_eq!(standard_encoding_lookup("PDFDocEncoding", b'B'), Some("B".to_string()));
+    }
+
+    #[test]
+    fn test_standard_encoding_lookup_unknown_encoding() {
+        // Unknown encoding: ASCII passthrough for printable chars
+        assert_eq!(standard_encoding_lookup("SomeWeirdEncoding", b'X'), Some("X".to_string()));
+        // Non-printable or < 32 → None
+        assert_eq!(standard_encoding_lookup("SomeWeirdEncoding", 0x01), None);
+        // High byte → None (not ASCII)
+        assert_eq!(standard_encoding_lookup("SomeWeirdEncoding", 0x80), None);
+    }
+
+    // =========================================================================
+    // pdfdoc_encoding_lookup
+    // =========================================================================
+
+    #[test]
+    fn test_pdfdoc_encoding_ascii_range() {
+        assert_eq!(pdfdoc_encoding_lookup(0x00), Some('\0'));
+        assert_eq!(pdfdoc_encoding_lookup(0x41), Some('A'));
+        assert_eq!(pdfdoc_encoding_lookup(0x7F), Some('\x7F'));
+    }
+
+    #[test]
+    fn test_pdfdoc_encoding_special_range() {
+        assert_eq!(pdfdoc_encoding_lookup(0x80), Some('\u{2022}')); // bullet
+        assert_eq!(pdfdoc_encoding_lookup(0x85), Some('\u{2013}')); // endash
+        assert_eq!(pdfdoc_encoding_lookup(0x93), Some('\u{FB01}')); // fi ligature
+        assert_eq!(pdfdoc_encoding_lookup(0x94), Some('\u{FB02}')); // fl ligature
+        assert_eq!(pdfdoc_encoding_lookup(0x92), Some('\u{2122}')); // trademark
+    }
+
+    #[test]
+    fn test_pdfdoc_encoding_undefined() {
+        assert_eq!(pdfdoc_encoding_lookup(0x9F), None);
+    }
+
+    #[test]
+    fn test_pdfdoc_encoding_latin1_range() {
+        assert_eq!(pdfdoc_encoding_lookup(0xA0), Some('\u{00A0}')); // NBSP
+        assert_eq!(pdfdoc_encoding_lookup(0xFF), Some('\u{00FF}')); // ydieresis
+    }
+
+    // =========================================================================
+    // symbol_encoding_lookup — extended coverage
+    // =========================================================================
+
+    #[test]
+    fn test_symbol_encoding_greek_lowercase() {
+        assert_eq!(symbol_encoding_lookup(0x61), Some('α'));
+        assert_eq!(symbol_encoding_lookup(0x62), Some('β'));
+        assert_eq!(symbol_encoding_lookup(0x67), Some('γ'));
+        assert_eq!(symbol_encoding_lookup(0x72), Some('ρ'));
+        assert_eq!(symbol_encoding_lookup(0x77), Some('ω'));
+    }
+
+    #[test]
+    fn test_symbol_encoding_greek_uppercase() {
+        assert_eq!(symbol_encoding_lookup(0x44), Some('Δ'));
+        assert_eq!(symbol_encoding_lookup(0x53), Some('Σ'));
+        assert_eq!(symbol_encoding_lookup(0x57), Some('Ω'));
+    }
+
+    #[test]
+    fn test_symbol_encoding_math_operators() {
+        assert_eq!(symbol_encoding_lookup(0xE1), Some('∑')); // summation
+        assert_eq!(symbol_encoding_lookup(0xF2), Some('∫')); // integral
+        assert_eq!(symbol_encoding_lookup(0xD6), Some('√')); // radical
+        assert_eq!(symbol_encoding_lookup(0xB1), Some('±')); // plusminus
+        assert_eq!(symbol_encoding_lookup(0xB9), Some('≠')); // notequal
+    }
+
+    #[test]
+    fn test_symbol_encoding_digits() {
+        // Digits 0x30-0x39 map to themselves
+        assert_eq!(symbol_encoding_lookup(0x30), Some('0'));
+        assert_eq!(symbol_encoding_lookup(0x39), Some('9'));
+    }
+
+    #[test]
+    fn test_symbol_encoding_punctuation() {
+        assert_eq!(symbol_encoding_lookup(0x20), Some(' '));
+        assert_eq!(symbol_encoding_lookup(0x2B), Some('+'));
+        assert_eq!(symbol_encoding_lookup(0x2D), Some('−')); // minus (not hyphen)
+    }
+
+    #[test]
+    fn test_symbol_encoding_unmapped() {
+        assert_eq!(symbol_encoding_lookup(0x00), None);
+        assert_eq!(symbol_encoding_lookup(0x01), None);
+    }
+
+    // =========================================================================
+    // zapf_dingbats_encoding_lookup — extended coverage
+    // =========================================================================
+
+    #[test]
+    fn test_zapf_dingbats_common() {
+        assert_eq!(zapf_dingbats_encoding_lookup(0x20), Some(' '));
+        assert_eq!(zapf_dingbats_encoding_lookup(0x21), Some('✁'));
+        assert_eq!(zapf_dingbats_encoding_lookup(0x33), Some('✓')); // checkmark
+        assert_eq!(zapf_dingbats_encoding_lookup(0x34), Some('✔')); // bold checkmark
+        assert_eq!(zapf_dingbats_encoding_lookup(0x48), Some('★')); // black star
+    }
+
+    #[test]
+    fn test_zapf_dingbats_geometric() {
+        assert_eq!(zapf_dingbats_encoding_lookup(0x6C), Some('●')); // black circle
+        assert_eq!(zapf_dingbats_encoding_lookup(0x6F), Some('■')); // black square
+    }
+
+    #[test]
+    fn test_zapf_dingbats_unmapped() {
+        assert_eq!(zapf_dingbats_encoding_lookup(0x00), None);
+        assert_eq!(zapf_dingbats_encoding_lookup(0xFF), None);
+    }
+
+    // =========================================================================
+    // glyph_name_to_unicode — extended edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_glyph_name_to_unicode_tex_math() {
+        assert_eq!(glyph_name_to_unicode("square"), Some('\u{25A1}'));
+        assert_eq!(glyph_name_to_unicode("emptyset"), Some('\u{2205}'));
+        assert_eq!(glyph_name_to_unicode("infty"), Some('\u{221E}'));
+        assert_eq!(glyph_name_to_unicode("nabla"), Some('\u{2207}'));
+        assert_eq!(glyph_name_to_unicode("forall"), Some('\u{2200}'));
+        assert_eq!(glyph_name_to_unicode("checkmark"), Some('\u{2713}'));
+    }
+
+    #[test]
+    fn test_glyph_name_to_unicode_underscore_compound() {
+        // "f_f" should return first component 'f' via AGL
+        assert_eq!(glyph_name_to_unicode("f_f"), Some('f'));
+        // "T_h" should return first component 'T' via AGL
+        assert_eq!(glyph_name_to_unicode("T_h"), Some('T'));
+    }
+
+    #[test]
+    fn test_glyph_name_to_unicode_uni_format_edge_cases() {
+        // Too short (not 7 chars total)
+        assert_eq!(glyph_name_to_unicode("uni004"), None);
+        // Invalid hex
+        assert_eq!(glyph_name_to_unicode("uniZZZZ"), None);
+    }
+
+    #[test]
+    fn test_glyph_name_to_unicode_u_format_long() {
+        // u1F600 = grinning face emoji
+        assert_eq!(glyph_name_to_unicode("u1F600"), Some('\u{1F600}'));
+    }
+
+    // =========================================================================
+    // glyph_name_to_unicode_string — compound names
+    // =========================================================================
+
+    #[test]
+    fn test_glyph_name_to_unicode_string_simple() {
+        // Single char should just return it as string
+        assert_eq!(glyph_name_to_unicode_string("A"), Some("A".to_string()));
+    }
+
+    #[test]
+    fn test_glyph_name_to_unicode_string_compound_ff() {
+        // glyph_name_to_unicode("f_f") returns Some('f') — first component via AGL
+        // So glyph_name_to_unicode_string wraps it as "f" (single-char short-circuit)
+        assert_eq!(glyph_name_to_unicode_string("f_f"), Some("f".to_string()));
+    }
+
+    #[test]
+    fn test_glyph_name_to_unicode_string_compound_all_known() {
+        // Use a compound name where each component is known individually.
+        // "T_h" → glyph_name_to_unicode finds 'T' (first component) → returns "T"
+        assert_eq!(glyph_name_to_unicode_string("T_h"), Some("T".to_string()));
+    }
+
+    #[test]
+    fn test_glyph_name_to_unicode_string_compound_unknown_part() {
+        // "f_unknownglyph" — glyph_name_to_unicode finds 'f' (first component via underscore rule)
+        // So it returns Some("f") not None
+        assert_eq!(glyph_name_to_unicode_string("f_unknownglyph"), Some("f".to_string()));
+    }
+
+    #[test]
+    fn test_glyph_name_to_unicode_string_totally_unknown_compound() {
+        // Both parts unknown — should return None
+        assert_eq!(glyph_name_to_unicode_string("xyzzy_plugh"), None);
+    }
+
+    #[test]
+    fn test_glyph_name_to_unicode_string_unknown() {
+        assert_eq!(glyph_name_to_unicode_string("totallyunknown"), None);
+    }
+
+    // =========================================================================
+    // is_ligature_char and expand_ligature_char
+    // =========================================================================
+
+    #[test]
+    fn test_is_ligature_char_all_variants() {
+        assert!(is_ligature_char('\u{FB00}')); // ff
+        assert!(is_ligature_char('\u{FB01}')); // fi
+        assert!(is_ligature_char('\u{FB02}')); // fl
+        assert!(is_ligature_char('\u{FB03}')); // ffi
+        assert!(is_ligature_char('\u{FB04}')); // ffl
+        assert!(is_ligature_char('\u{FB05}')); // long s + t
+        assert!(is_ligature_char('\u{FB06}')); // st
+        assert!(!is_ligature_char('A'));
+        assert!(!is_ligature_char(' '));
+    }
+
+    #[test]
+    fn test_expand_ligature_char_all_variants() {
+        assert_eq!(expand_ligature_char('\u{FB00}'), Some("ff"));
+        assert_eq!(expand_ligature_char('\u{FB01}'), Some("fi"));
+        assert_eq!(expand_ligature_char('\u{FB02}'), Some("fl"));
+        assert_eq!(expand_ligature_char('\u{FB03}'), Some("ffi"));
+        assert_eq!(expand_ligature_char('\u{FB04}'), Some("ffl"));
+        assert_eq!(expand_ligature_char('\u{FB05}'), Some("st"));
+        assert_eq!(expand_ligature_char('\u{FB06}'), Some("st"));
+        assert_eq!(expand_ligature_char('x'), None);
+    }
+
+    // =========================================================================
+    // expand_ligature_char_code
+    // =========================================================================
+
+    #[test]
+    fn test_expand_ligature_char_code_all_variants() {
+        assert_eq!(expand_ligature_char_code(0xFB00), Some("ff"));
+        assert_eq!(expand_ligature_char_code(0xFB01), Some("fi"));
+        assert_eq!(expand_ligature_char_code(0xFB02), Some("fl"));
+        assert_eq!(expand_ligature_char_code(0xFB03), Some("ffi"));
+        assert_eq!(expand_ligature_char_code(0xFB04), Some("ffl"));
+        assert_eq!(expand_ligature_char_code(0xFB05), Some("st"));
+        assert_eq!(expand_ligature_char_code(0xFB06), Some("st"));
+        assert_eq!(expand_ligature_char_code(0x0041), None);
+        assert_eq!(expand_ligature_char_code(0x0000), None);
+    }
+
+    // =========================================================================
+    // get_glyph_width — simple font widths array
+    // =========================================================================
+
+    #[test]
+    fn test_get_glyph_width_simple_font_widths_array() {
+        let font = make_font(|f| {
+            f.widths = Some(vec![200.0, 300.0, 400.0, 500.0]);
+            f.first_char = Some(65); // 'A'
+            f.last_char = Some(68); // 'D'
+            f.default_width = 600.0;
+        });
+        assert_eq!(font.get_glyph_width(65), 200.0); // 'A'
+        assert_eq!(font.get_glyph_width(66), 300.0); // 'B'
+        assert_eq!(font.get_glyph_width(67), 400.0); // 'C'
+        assert_eq!(font.get_glyph_width(68), 500.0); // 'D'
+                                                     // Out of range → default_width
+        assert_eq!(font.get_glyph_width(64), 600.0);
+        assert_eq!(font.get_glyph_width(69), 600.0);
+    }
+
+    #[test]
+    fn test_get_glyph_width_below_first_char() {
+        let font = make_font(|f| {
+            f.widths = Some(vec![250.0]);
+            f.first_char = Some(100);
+            f.last_char = Some(100);
+            f.default_width = 777.0;
+        });
+        // char_code < first_char → negative index → default
+        assert_eq!(font.get_glyph_width(50), 777.0);
+    }
+
+    #[test]
+    fn test_get_glyph_width_no_widths_no_cid() {
+        let font = make_font(|f| {
+            f.default_width = 550.0;
+        });
+        assert_eq!(font.get_glyph_width(65), 550.0);
+    }
+
+    // =========================================================================
+    // get_space_glyph_width
+    // =========================================================================
+
+    #[test]
+    fn test_get_space_glyph_width_from_array() {
+        let font = make_font(|f| {
+            f.widths = Some(vec![250.0]); // only one entry
+            f.first_char = Some(32); // space = 0x20 = 32
+            f.last_char = Some(32);
+        });
+        assert_eq!(font.get_space_glyph_width(), 250.0);
+    }
+
+    #[test]
+    fn test_get_space_glyph_width_default() {
+        let font = make_font(|f| {
+            f.default_width = 333.0;
+        });
+        assert_eq!(font.get_space_glyph_width(), 333.0);
+    }
+
+    // =========================================================================
+    // is_symbolic — flags and name-based detection
+    // =========================================================================
+
+    #[test]
+    fn test_is_symbolic_flag_set() {
+        let font = make_font(|f| {
+            f.flags = Some(0x04); // bit 3 set
+        });
+        assert!(font.is_symbolic());
+    }
+
+    #[test]
+    fn test_is_symbolic_flag_not_set() {
+        let font = make_font(|f| {
+            f.flags = Some(0x20); // nonsymbolic bit only
+        });
+        assert!(!font.is_symbolic());
+    }
+
+    #[test]
+    fn test_is_symbolic_no_flags_symbol_name() {
+        let font = make_font(|f| {
+            f.base_font = "Symbol".to_string();
+        });
+        assert!(font.is_symbolic());
+    }
+
+    #[test]
+    fn test_is_symbolic_no_flags_zapf_name() {
+        let font = make_font(|f| {
+            f.base_font = "ZapfDingbats".to_string();
+        });
+        assert!(font.is_symbolic());
+    }
+
+    #[test]
+    fn test_is_symbolic_no_flags_normal_name() {
+        let font = make_font(|f| {
+            f.base_font = "Helvetica".to_string();
+        });
+        assert!(!font.is_symbolic());
+    }
+
+    // =========================================================================
+    // get_encoded_char
+    // =========================================================================
+
+    #[test]
+    fn test_get_encoded_char_custom() {
+        let mut map = HashMap::new();
+        map.insert(0x41, 'X');
+        map.insert(0x42, 'Y');
+        let font = make_font(|f| {
+            f.encoding = Encoding::Custom(map);
+        });
+        assert_eq!(font.get_encoded_char(0x41), Some('X'));
+        assert_eq!(font.get_encoded_char(0x42), Some('Y'));
+        assert_eq!(font.get_encoded_char(0x43), None);
+    }
+
+    #[test]
+    fn test_get_encoded_char_standard_ascii() {
+        let font = make_font(|f| {
+            f.encoding = Encoding::Standard("WinAnsiEncoding".to_string());
+        });
+        assert_eq!(font.get_encoded_char(0x41), Some('A'));
+        assert_eq!(font.get_encoded_char(0x20), Some(' '));
+        // High byte → None (>= 128)
+        assert_eq!(font.get_encoded_char(0x80), None);
+    }
+
+    #[test]
+    fn test_get_encoded_char_identity_ascii() {
+        let font = make_font(|f| {
+            f.encoding = Encoding::Identity;
+        });
+        assert_eq!(font.get_encoded_char(0x41), Some('A'));
+        assert_eq!(font.get_encoded_char(0x80), None);
+    }
+
+    // =========================================================================
+    // has_custom_encoding
+    // =========================================================================
+
+    #[test]
+    fn test_has_custom_encoding_true() {
+        let font = make_font(|f| {
+            f.encoding = Encoding::Custom(HashMap::new());
+        });
+        assert!(font.has_custom_encoding());
+    }
+
+    #[test]
+    fn test_has_custom_encoding_false_standard() {
+        let font = make_font(|_| {});
+        assert!(!font.has_custom_encoding());
+    }
+
+    #[test]
+    fn test_has_custom_encoding_false_identity() {
+        let font = make_font(|f| {
+            f.encoding = Encoding::Identity;
+        });
+        assert!(!font.has_custom_encoding());
+    }
+
+    // =========================================================================
+    // char_to_unicode — Symbol font path
+    // =========================================================================
+
+    #[test]
+    fn test_char_to_unicode_symbol_font() {
+        let font = make_font(|f| {
+            f.base_font = "Symbol".to_string();
+            f.flags = Some(0x04); // Symbolic
+            f.encoding = Encoding::Standard("SymbolicBuiltIn".to_string());
+        });
+        // alpha
+        assert_eq!(font.char_to_unicode(0x61), Some("α".to_string()));
+        // Sigma
+        assert_eq!(font.char_to_unicode(0x53), Some("Σ".to_string()));
+        // integral
+        assert_eq!(font.char_to_unicode(0xF2), Some("∫".to_string()));
+    }
+
+    #[test]
+    fn test_char_to_unicode_zapfdingbats_font() {
+        let font = make_font(|f| {
+            f.base_font = "ZapfDingbats".to_string();
+            f.flags = Some(0x04); // Symbolic
+            f.encoding = Encoding::Standard("SymbolicBuiltIn".to_string());
+        });
+        // checkmark
+        assert_eq!(font.char_to_unicode(0x33), Some("✓".to_string()));
+        // star
+        assert_eq!(font.char_to_unicode(0x48), Some("★".to_string()));
+    }
+
+    // =========================================================================
+    // char_to_unicode — ligature expansion path
+    // =========================================================================
+
+    #[test]
+    fn test_char_to_unicode_ligature_expansion() {
+        // Ligature codes come through when no ToUnicode and not in encoding
+        let font = make_font(|f| {
+            f.encoding = Encoding::Standard("WinAnsiEncoding".to_string());
+        });
+        // 0xFB01 (fi ligature) should expand to "fi"
+        assert_eq!(font.char_to_unicode(0xFB01), Some("fi".to_string()));
+        // 0xFB03 (ffi ligature) should expand to "ffi"
+        assert_eq!(font.char_to_unicode(0xFB03), Some("ffi".to_string()));
+    }
+
+    // =========================================================================
+    // char_to_unicode — custom encoding with ligature
+    // =========================================================================
+
+    #[test]
+    fn test_char_to_unicode_custom_encoding_with_ligature() {
+        let mut custom = HashMap::new();
+        custom.insert(0x01, '\u{FB01}'); // fi ligature
+        let font = make_font(|f| {
+            f.encoding = Encoding::Custom(custom);
+        });
+        // Should expand ligature
+        assert_eq!(font.char_to_unicode(0x01), Some("fi".to_string()));
+    }
+
+    #[test]
+    fn test_char_to_unicode_custom_encoding_multi_char_map() {
+        let font = make_font(|f| {
+            f.encoding = Encoding::Custom(HashMap::new());
+            f.multi_char_map.insert(0x01, "ff".to_string());
+        });
+        assert_eq!(font.char_to_unicode(0x01), Some("ff".to_string()));
+    }
+
+    // =========================================================================
+    // char_to_unicode — ToUnicode with U+FFFD (replacement character skip)
+    // =========================================================================
+
+    #[test]
+    fn test_char_to_unicode_tounicode_fffd_fallback() {
+        // A ToUnicode mapping to U+FFFD should be treated as missing
+        // and fall back to encoding
+        let cmap_data = b"beginbfchar\n<0041> <FFFD>\nendbfchar";
+        let font = make_font(|f| {
+            f.to_unicode = Some(LazyCMap::new(cmap_data.to_vec()));
+            f.encoding = Encoding::Standard("WinAnsiEncoding".to_string());
+        });
+        // Should fall through FFFD and use WinAnsi → 'A'
+        assert_eq!(font.char_to_unicode(0x41), Some("A".to_string()));
+    }
+
+    #[test]
+    fn test_char_to_unicode_tounicode_control_char_fallback() {
+        // A ToUnicode mapping to control characters should be treated as missing
+        let cmap_data = b"beginbfchar\n<0041> <0001>\nendbfchar";
+        let font = make_font(|f| {
+            f.to_unicode = Some(LazyCMap::new(cmap_data.to_vec()));
+            f.encoding = Encoding::Standard("WinAnsiEncoding".to_string());
+        });
+        // Control char mapping → fallback to WinAnsi → 'A'
+        assert_eq!(font.char_to_unicode(0x41), Some("A".to_string()));
+    }
+
+    // =========================================================================
+    // char_to_unicode — Type0 with Identity-H and CIDSystemInfo
+    // =========================================================================
+
+    #[test]
+    fn test_char_to_unicode_type0_identity_h_with_sysinfo() {
+        let font = make_font(|f| {
+            f.base_font = "CIDFont+F1".to_string();
+            f.subtype = "Type0".to_string();
+            f.encoding = Encoding::Standard("Identity-H".to_string());
+            f.cid_system_info = Some(CIDSystemInfo {
+                registry: "Adobe".to_string(),
+                ordering: "Identity".to_string(),
+                supplement: 0,
+            });
+            f.cid_to_gid_map = Some(CIDToGIDMap::Identity);
+        });
+        // Adobe-Identity with no TrueType cmap → CID-as-Unicode fallback
+        // For non-control Unicode code points, char_code == Unicode
+        assert_eq!(font.char_to_unicode(0x41), Some("A".to_string()));
+        assert_eq!(font.char_to_unicode(0x4E2D), Some("\u{4E2D}".to_string())); // 中
+    }
+
+    #[test]
+    fn test_char_to_unicode_type0_identity_h_no_sysinfo() {
+        let font = make_font(|f| {
+            f.base_font = "CIDFont+F2".to_string();
+            f.subtype = "Type0".to_string();
+            f.encoding = Encoding::Standard("Identity-H".to_string());
+        });
+        // No CIDSystemInfo → CID-as-Unicode last resort
+        assert_eq!(font.char_to_unicode(0x42), Some("B".to_string()));
+    }
+
+    // =========================================================================
+    // char_to_unicode — Type0 with Identity encoding (not Standard)
+    // =========================================================================
+
+    #[test]
+    fn test_char_to_unicode_type0_identity_encoding_cid_as_unicode() {
+        let font = make_font(|f| {
+            f.base_font = "MyCIDFont".to_string();
+            f.subtype = "Type0".to_string();
+            f.encoding = Encoding::Identity;
+            // No TrueType cmap, no CIDToGIDMap → CID-as-Unicode fallback
+        });
+        assert_eq!(font.char_to_unicode(0x41), Some("A".to_string()));
+    }
+
+    #[test]
+    fn test_char_to_unicode_type0_identity_encoding_control_char() {
+        let font = make_font(|f| {
+            f.subtype = "Type0".to_string();
+            f.encoding = Encoding::Identity;
+        });
+        // Control char (0x01) should return FFFD because CID-as-Unicode skips controls
+        // but the last resort returns FFFD
+        let result = font.char_to_unicode(0x01);
+        assert_eq!(result, Some("\u{FFFD}".to_string()));
+    }
+
+    // =========================================================================
+    // char_to_unicode — Identity encoding for simple (non-Type0) fonts
+    // =========================================================================
+
+    #[test]
+    fn test_char_to_unicode_simple_font_identity() {
+        let font = make_font(|f| {
+            f.subtype = "Type1".to_string();
+            f.encoding = Encoding::Identity;
+        });
+        assert_eq!(font.char_to_unicode(0x41), Some("A".to_string()));
+        assert_eq!(font.char_to_unicode(0x263A), Some("☺".to_string()));
+    }
+
+    // =========================================================================
+    // char_to_unicode — TrueType StandardEncoding fallback
+    // =========================================================================
+
+    #[test]
+    fn test_char_to_unicode_truetype_standard_encoding_ascii() {
+        let font = make_font(|f| {
+            f.subtype = "TrueType".to_string();
+            f.encoding = Encoding::Standard("StandardEncoding".to_string());
+        });
+        // Should use standard encoding lookup for ASCII
+        assert_eq!(font.char_to_unicode(0x41), Some("A".to_string()));
+    }
+
+    // =========================================================================
+    // char_to_unicode — MacRomanEncoding
+    // =========================================================================
+
+    #[test]
+    fn test_char_to_unicode_macroman_extended() {
+        let font = make_font(|f| {
+            f.encoding = Encoding::Standard("MacRomanEncoding".to_string());
+        });
+        assert_eq!(font.char_to_unicode(0x41), Some("A".to_string()));
+        // 0x80 → Adieresis (Ä)
+        assert_eq!(font.char_to_unicode(0x80), Some("\u{00C4}".to_string()));
+    }
+
+    // =========================================================================
+    // get_font_weight — DemiBold name heuristic
+    // =========================================================================
+
+    #[test]
+    fn test_get_font_weight_demibold() {
+        let font = make_font(|f| {
+            f.base_font = "MyFont-DemiBold".to_string();
+        });
+        assert_eq!(font.get_font_weight(), FontWeight::SemiBold);
+    }
+
+    #[test]
+    fn test_get_font_weight_heavy() {
+        let font = make_font(|f| {
+            f.base_font = "MyFont-Heavy".to_string();
+        });
+        assert_eq!(font.get_font_weight(), FontWeight::Black);
+    }
+
+    #[test]
+    fn test_get_font_weight_ultrabold() {
+        let font = make_font(|f| {
+            f.base_font = "MyFont-UltraBold".to_string();
+        });
+        assert_eq!(font.get_font_weight(), FontWeight::ExtraBold);
+    }
+
+    #[test]
+    fn test_get_font_weight_ultralight() {
+        let font = make_font(|f| {
+            f.base_font = "MyFont-UltraLight".to_string();
+        });
+        assert_eq!(font.get_font_weight(), FontWeight::ExtraLight);
+    }
+
+    // =========================================================================
+    // get_byte_to_char_table
+    // =========================================================================
+
+    #[test]
+    fn test_get_byte_to_char_table_basic() {
+        let font = make_font(|f| {
+            f.encoding = Encoding::Standard("WinAnsiEncoding".to_string());
+        });
+        let table = font.get_byte_to_char_table();
+        // ASCII 'A' (0x41 = 65) should be 'A'
+        assert_eq!(table[0x41], 'A');
+        // space (0x20 = 32)
+        assert_eq!(table[0x20], ' ');
+        // Control chars (except tab/newline/cr) should be '\0'
+        assert_eq!(table[0x01], '\0');
+    }
+
+    #[test]
+    fn test_get_byte_to_char_table_tab_newline_passthrough() {
+        let font = make_font(|f| {
+            let mut custom = HashMap::new();
+            custom.insert(0x09u8, '\t');
+            custom.insert(0x0Au8, '\n');
+            custom.insert(0x0Du8, '\r');
+            f.encoding = Encoding::Custom(custom);
+        });
+        let table = font.get_byte_to_char_table();
+        assert_eq!(table[0x09], '\t');
+        assert_eq!(table[0x0A], '\n');
+        assert_eq!(table[0x0D], '\r');
+    }
+
+    // =========================================================================
+    // get_byte_to_width_table
+    // =========================================================================
+
+    #[test]
+    fn test_get_byte_to_width_table_basic() {
+        let font = make_font(|f| {
+            f.widths = Some(vec![200.0, 300.0, 400.0]);
+            f.first_char = Some(65); // 'A'
+            f.default_width = 500.0;
+        });
+        let table = font.get_byte_to_width_table();
+        assert_eq!(table[65], 200.0);
+        assert_eq!(table[66], 300.0);
+        assert_eq!(table[67], 400.0);
+        // Unmapped code uses default
+        assert_eq!(table[0], 500.0);
+        assert_eq!(table[100], 500.0);
+    }
+
+    #[test]
+    fn test_get_byte_to_width_table_no_widths() {
+        let font = make_font(|f| {
+            f.default_width = 600.0;
+        });
+        let table = font.get_byte_to_width_table();
+        // All entries should be default_width
+        for &w in table.iter() {
+            assert_eq!(w, 600.0);
+        }
+    }
+
+    // =========================================================================
+    // lookup_predefined_cmap — fallback by ordering alone
+    // =========================================================================
+
+    #[test]
+    fn test_lookup_predefined_cmap_ordering_fallback_gb1() {
+        // Even with non-standard CMap name, ordering "GB1" should work
+        let sysinfo = Some(CIDSystemInfo {
+            registry: "Adobe".to_string(),
+            ordering: "GB1".to_string(),
+            supplement: 2,
+        });
+        assert_eq!(lookup_predefined_cmap("SomeCustomCMap", &sysinfo, 34), Some(0x41));
+    }
+
+    #[test]
+    fn test_lookup_predefined_cmap_ordering_fallback_japan1() {
+        let sysinfo = Some(CIDSystemInfo {
+            registry: "Adobe".to_string(),
+            ordering: "Japan1".to_string(),
+            supplement: 4,
+        });
+        assert_eq!(lookup_predefined_cmap("CustomJapanCMap", &sysinfo, 34), Some(0x41));
+    }
+
+    #[test]
+    fn test_lookup_predefined_cmap_ordering_fallback_cns1() {
+        let sysinfo = Some(CIDSystemInfo {
+            registry: "Adobe".to_string(),
+            ordering: "CNS1".to_string(),
+            supplement: 3,
+        });
+        assert_eq!(lookup_predefined_cmap("CustomCNSCMap", &sysinfo, 34), Some(0x41));
+    }
+
+    #[test]
+    fn test_lookup_predefined_cmap_ordering_fallback_korea1() {
+        let sysinfo = Some(CIDSystemInfo {
+            registry: "Adobe".to_string(),
+            ordering: "Korea1".to_string(),
+            supplement: 1,
+        });
+        assert_eq!(lookup_predefined_cmap("CustomKoreaCMap", &sysinfo, 34), Some(0x41));
+    }
+
+    #[test]
+    fn test_lookup_predefined_cmap_unknown_ordering() {
+        let sysinfo = Some(CIDSystemInfo {
+            registry: "Custom".to_string(),
+            ordering: "Unknown".to_string(),
+            supplement: 0,
+        });
+        assert_eq!(lookup_predefined_cmap("AnyCMap", &sysinfo, 34), None);
+    }
+
+    // =========================================================================
+    // truetype_cmap() accessor — non-TrueType font
+    // =========================================================================
+
+    #[test]
+    fn test_truetype_cmap_not_truetype() {
+        let font = make_font(|f| {
+            f.is_truetype_font = false;
+            f.embedded_font_data = None;
+        });
+        assert!(font.truetype_cmap().is_none());
+    }
+
+    #[test]
+    fn test_truetype_cmap_truetype_no_data() {
+        let font = make_font(|f| {
+            f.is_truetype_font = true;
+            f.embedded_font_data = None;
+        });
+        assert!(font.truetype_cmap().is_none());
+    }
+
+    #[test]
+    fn test_truetype_cmap_truetype_empty_data() {
+        let font = make_font(|f| {
+            f.is_truetype_font = true;
+            f.embedded_font_data = Some(Arc::new(vec![]));
+        });
+        assert!(font.truetype_cmap().is_none());
+    }
+
+    #[test]
+    fn test_truetype_cmap_truetype_invalid_data() {
+        let font = make_font(|f| {
+            f.is_truetype_font = true;
+            f.embedded_font_data = Some(Arc::new(vec![0xFF, 0xFF, 0xFF, 0xFF]));
+        });
+        // Invalid font data → extraction fails → None
+        assert!(font.truetype_cmap().is_none());
+    }
+
+    #[test]
+    fn test_has_truetype_cmap_no_data() {
+        let font = make_font(|f| {
+            f.is_truetype_font = false;
+        });
+        assert!(!font.has_truetype_cmap());
+    }
+
+    // =========================================================================
+    // set_truetype_cmap
+    // =========================================================================
+
+    #[test]
+    fn test_set_truetype_cmap_to_none() {
+        let mut font = make_font(|_| {});
+        font.set_truetype_cmap(None);
+        assert!(font.truetype_cmap().is_none());
+    }
+
+    // =========================================================================
+    // CIDToGIDMap edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_cid_to_gid_explicit_empty() {
+        let map = CIDToGIDMap::Explicit(vec![]);
+        // Empty array → all fall back to identity
+        assert_eq!(map.get_gid(0), 0);
+        assert_eq!(map.get_gid(100), 100);
+    }
+
+    #[test]
+    fn test_cid_to_gid_explicit_boundary() {
+        let map = CIDToGIDMap::Explicit(vec![99, 88]);
+        assert_eq!(map.get_gid(0), 99);
+        assert_eq!(map.get_gid(1), 88);
+        // index 2 is out of bounds → identity
+        assert_eq!(map.get_gid(2), 2);
+    }
+
+    #[test]
+    fn test_cid_to_gid_identity_max() {
+        let map = CIDToGIDMap::Identity;
+        assert_eq!(map.get_gid(u16::MAX), u16::MAX);
+    }
+
+    // =========================================================================
+    // char_to_unicode — Type0 Identity encoding with CIDToGIDMap + AGL fallback
+    // =========================================================================
+
+    #[test]
+    fn test_char_to_unicode_type0_identity_agl_fallback() {
+        let font = make_font(|f| {
+            f.base_font = "SubsetFont+F3".to_string();
+            f.subtype = "Type0".to_string();
+            f.encoding = Encoding::Identity;
+            f.cid_to_gid_map = Some(CIDToGIDMap::Identity);
+            // No TrueType cmap → AGL fallback path
+        });
+        // CID 0x41 → GID 0x41 → glyph name "A" → AGL → 'A'
+        assert_eq!(font.char_to_unicode(0x41), Some("A".to_string()));
+    }
+
+    // =========================================================================
+    // char_to_unicode — Type0 RKSJ (Shift-JIS) path
+    // =========================================================================
+
+    #[test]
+    fn test_char_to_unicode_type0_rksj() {
+        let font = make_font(|f| {
+            f.subtype = "Type0".to_string();
+            f.encoding = Encoding::Standard("90ms-RKSJ-H".to_string());
+        });
+        // ASCII char through Shift-JIS
+        assert_eq!(font.char_to_unicode(0x41), Some("A".to_string()));
+    }
+
+    // =========================================================================
+    // char_to_unicode — Type0 Identity-H/V at Priority 3 fallback
+    // =========================================================================
+
+    #[test]
+    fn test_char_to_unicode_type0_identity_v() {
+        let font = make_font(|f| {
+            f.subtype = "Type0".to_string();
+            f.encoding = Encoding::Standard("Identity-V".to_string());
+        });
+        // No CIDSystemInfo → CID-as-Unicode last resort
+        assert_eq!(font.char_to_unicode(0x42), Some("B".to_string()));
+    }
+
+    // =========================================================================
+    // char_to_unicode — unknown encoding for simple font
+    // =========================================================================
+
+    #[test]
+    fn test_char_to_unicode_unknown_standard_encoding() {
+        let font = make_font(|f| {
+            f.encoding = Encoding::Standard("SomeRandomEncoding".to_string());
+        });
+        // Unknown encoding falls back to ASCII passthrough for printable
+        assert_eq!(font.char_to_unicode(0x41), Some("A".to_string()));
+        // Non-ASCII will return None from standard_encoding_lookup
+        assert_eq!(font.char_to_unicode(0x80), None);
+    }
+
+    // =========================================================================
+    // Encoding enum Debug/Clone
+    // =========================================================================
+
+    #[test]
+    fn test_encoding_identity_clone() {
+        let enc = Encoding::Identity;
+        let enc2 = enc.clone();
+        assert!(matches!(enc2, Encoding::Identity));
+    }
+
+    #[test]
+    fn test_encoding_custom_clone() {
+        let mut map = HashMap::new();
+        map.insert(1u8, 'X');
+        let enc = Encoding::Custom(map);
+        let enc2 = enc.clone();
+        match enc2 {
+            Encoding::Custom(m) => assert_eq!(m.get(&1), Some(&'X')),
+            _ => panic!("Wrong encoding type"),
+        }
+    }
+
+    #[test]
+    fn test_encoding_debug() {
+        let enc = Encoding::Standard("WinAnsiEncoding".to_string());
+        let debug = format!("{:?}", enc);
+        assert!(debug.contains("WinAnsiEncoding"));
+    }
+
+    // =========================================================================
+    // CIDSystemInfo clone/debug
+    // =========================================================================
+
+    #[test]
+    fn test_cidsysteminfo_clone() {
+        let info = CIDSystemInfo {
+            registry: "Adobe".to_string(),
+            ordering: "Japan1".to_string(),
+            supplement: 6,
+        };
+        let info2 = info.clone();
+        assert_eq!(info2.registry, "Adobe");
+        assert_eq!(info2.ordering, "Japan1");
+        assert_eq!(info2.supplement, 6);
+    }
+
+    #[test]
+    fn test_cidsysteminfo_debug() {
+        let info = CIDSystemInfo {
+            registry: "Adobe".to_string(),
+            ordering: "GB1".to_string(),
+            supplement: 2,
+        };
+        let debug = format!("{:?}", info);
+        assert!(debug.contains("Adobe"));
+        assert!(debug.contains("GB1"));
+    }
+
+    // =========================================================================
+    // CIDToGIDMap clone/debug
+    // =========================================================================
+
+    #[test]
+    fn test_cidtogidmap_clone() {
+        let map = CIDToGIDMap::Explicit(vec![1, 2, 3]);
+        let map2 = map.clone();
+        assert_eq!(map2.get_gid(0), 1);
+    }
+
+    #[test]
+    fn test_cidtogidmap_debug() {
+        let map = CIDToGIDMap::Identity;
+        let debug = format!("{:?}", map);
+        assert!(debug.contains("Identity"));
+    }
+
+    // =========================================================================
+    // char_to_unicode — Type0 Identity encoding with large CID (> 0xFFFF)
+    // =========================================================================
+
+    #[test]
+    fn test_char_to_unicode_type0_identity_large_cid() {
+        let font = make_font(|f| {
+            f.subtype = "Type0".to_string();
+            f.encoding = Encoding::Identity;
+            f.cid_to_gid_map = Some(CIDToGIDMap::Identity);
+        });
+        // CID > 0xFFFF: TrueType cmap lookup returns early with None,
+        // AGL fallback also returns early for large CIDs,
+        // then CID-as-Unicode fallback kicks in: 0x10000 is valid Unicode (Linear B Syllable B008 A)
+        assert_eq!(font.char_to_unicode(0x10000), Some("\u{10000}".to_string()));
+        // But a CID that maps to a control character should return FFFD
+        assert_eq!(font.char_to_unicode(0x01), Some("\u{FFFD}".to_string()));
+    }
+
+    // =========================================================================
+    // char_to_unicode — Type0 predefined CMap fallback (Priority 2b)
+    // =========================================================================
+
+    #[test]
+    fn test_char_to_unicode_type0_predefined_cmap_japan1() {
+        let font = make_font(|f| {
+            f.subtype = "Type0".to_string();
+            f.encoding = Encoding::Identity; // Will be tried at priority 2b
+            f.cid_system_info = Some(CIDSystemInfo {
+                registry: "Adobe".to_string(),
+                ordering: "Japan1".to_string(),
+                supplement: 4,
+            });
+        });
+        // CID 843 → Hiragana あ (U+3042) via predefined Japan1 CMap
+        assert_eq!(font.char_to_unicode(843), Some("\u{3042}".to_string()));
+    }
+
+    // =========================================================================
+    // gid_to_standard_glyph_name — boundary checks
+    // =========================================================================
+
+    #[test]
+    fn test_gid_to_standard_glyph_name_boundary_values() {
+        // First valid entry
+        assert_eq!(FontInfo::gid_to_standard_glyph_name(0x20), Some("space"));
+        // Last valid in basic ASCII
+        assert_eq!(FontInfo::gid_to_standard_glyph_name(0x7E), Some("asciitilde"));
+        // Just before first valid
+        assert_eq!(FontInfo::gid_to_standard_glyph_name(0x1F), None);
+        // 0x7F (DEL) is not mapped
+        assert_eq!(FontInfo::gid_to_standard_glyph_name(0x7F), None);
+        // Last valid entry
+        assert_eq!(FontInfo::gid_to_standard_glyph_name(0xFF), Some("ydieresis"));
+    }
+
+    // =========================================================================
+    // glyph_name_to_unicode — AGL completeness spot checks
+    // =========================================================================
+
+    #[test]
+    fn test_glyph_name_to_unicode_math_symbols() {
+        assert_eq!(glyph_name_to_unicode("infinity"), Some('∞'));
+        assert_eq!(glyph_name_to_unicode("notequal"), Some('≠'));
+        assert_eq!(glyph_name_to_unicode("lessequal"), Some('≤'));
+        assert_eq!(glyph_name_to_unicode("greaterequal"), Some('≥'));
+    }
+
+    #[test]
+    fn test_glyph_name_to_unicode_german_sharp_s() {
+        assert_eq!(glyph_name_to_unicode("germandbls"), Some('ß'));
+    }
+
+    #[test]
+    fn test_glyph_name_to_unicode_copyright_registered() {
+        assert_eq!(glyph_name_to_unicode("copyright"), Some('©'));
+        assert_eq!(glyph_name_to_unicode("registered"), Some('®'));
+        assert_eq!(glyph_name_to_unicode("trademark"), Some('™'));
+    }
+
+    // =========================================================================
+    // char_to_unicode — Type0 Identity-H with non-Identity ordering (CJK)
+    // =========================================================================
+
+    #[test]
+    fn test_char_to_unicode_type0_identity_h_cjk_ordering() {
+        let font = make_font(|f| {
+            f.subtype = "Type0".to_string();
+            f.encoding = Encoding::Standard("Identity-H".to_string());
+            f.cid_system_info = Some(CIDSystemInfo {
+                registry: "Adobe".to_string(),
+                ordering: "Japan1".to_string(),
+                supplement: 4,
+            });
+        });
+        // Non-identity ordering with Identity-H: CIDs are NOT Unicode
+        // Should use predefined CMap lookup
+        // CID 843 → Hiragana あ (U+3042)
+        assert_eq!(font.char_to_unicode(843), Some("\u{3042}".to_string()));
+    }
+
+    // =========================================================================
+    // char_to_unicode — UCS2/UTF16 encoding variant
+    // =========================================================================
+
+    #[test]
+    fn test_char_to_unicode_type0_ucs2_encoding() {
+        let font = make_font(|f| {
+            f.subtype = "Type0".to_string();
+            f.encoding = Encoding::Standard("UniJIS-UCS2-H".to_string());
+            f.cid_system_info = Some(CIDSystemInfo {
+                registry: "Adobe".to_string(),
+                ordering: "Identity".to_string(),
+                supplement: 0,
+            });
+        });
+        // UCS2 encoding: char_code IS the Unicode value
+        assert_eq!(font.char_to_unicode(0x41), Some("A".to_string()));
+    }
+
+    // =========================================================================
+    // Standard encoding control char handling
+    // =========================================================================
+
+    #[test]
+    fn test_standard_encoding_winansi_control_range() {
+        // Codes 0-31 are control range — WinAnsi doesn't map these
+        assert_eq!(standard_encoding_lookup("WinAnsiEncoding", 0x00), None);
+        assert_eq!(standard_encoding_lookup("WinAnsiEncoding", 0x01), None);
+        assert_eq!(standard_encoding_lookup("WinAnsiEncoding", 0x1F), None);
+    }
+
+    // =========================================================================
+    // WinAnsi full extended range spot checks
+    // =========================================================================
+
+    #[test]
+    fn test_standard_encoding_winansi_full_extended() {
+        // 0x85 → Horizontal ellipsis (U+2026)
+        assert_eq!(standard_encoding_lookup("WinAnsiEncoding", 0x85), Some("\u{2026}".to_string()));
+        // 0x99 → Trade mark sign (U+2122)
+        assert_eq!(standard_encoding_lookup("WinAnsiEncoding", 0x99), Some("\u{2122}".to_string()));
+        // 0xFF → Latin small letter y with diaeresis
+        assert_eq!(standard_encoding_lookup("WinAnsiEncoding", 0xFF), Some("\u{00FF}".to_string()));
     }
 }

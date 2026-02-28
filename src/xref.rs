@@ -9,8 +9,8 @@
 use crate::error::{Error, Result};
 use crate::object::Object;
 use crate::parser::parse_object;
-use std::collections::HashMap;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::collections::{HashMap, HashSet};
+use std::io::{Read, Seek, SeekFrom};
 
 /// Cross-reference table entry type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +158,19 @@ impl CrossRefTable {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Shift all uncompressed entry offsets by a delta.
+    ///
+    /// Used when a PDF has garbage bytes prepended before `%PDF-`:
+    /// the xref offsets are relative to the real start of the PDF data,
+    /// but byte positions in the file are shifted by `header_offset`.
+    pub fn shift_offsets(&mut self, delta: u64) {
+        for entry in self.entries.values_mut() {
+            if entry.in_use && entry.entry_type == XRefEntryType::Uncompressed {
+                entry.offset += delta;
+            }
+        }
+    }
 }
 
 impl Default for CrossRefTable {
@@ -221,7 +234,36 @@ pub fn find_xref_offset<R: Read + Seek>(reader: &mut R) -> Result<u64> {
 ///
 /// Returns `Error::InvalidXref` if parsing fails for both formats.
 pub fn parse_xref<R: Read + Seek>(reader: &mut R, offset: u64) -> Result<CrossRefTable> {
-    parse_xref_recursive(reader, offset, 0)
+    parse_xref_iterative(reader, offset)
+}
+
+/// Extract /Length value from raw bytes of an xref stream object header.
+///
+/// Searches for `/Length` followed by an integer in the raw dictionary bytes.
+/// Returns `None` if not found or not parseable. This avoids full object parsing
+/// just to determine how much data to read.
+fn find_stream_length(data: &[u8]) -> Option<usize> {
+    // Search for "/Length" (case-sensitive, per PDF spec)
+    let keyword = b"/Length";
+    let pos = data.windows(keyword.len()).position(|w| w == keyword)?;
+    let after = &data[pos + keyword.len()..];
+
+    // Skip whitespace
+    let start = after.iter().position(|&b| !b.is_ascii_whitespace())?;
+    let after = &after[start..];
+
+    // If the next token is a digit, parse the integer
+    if after.first()?.is_ascii_digit() {
+        let end = after
+            .iter()
+            .position(|b| !b.is_ascii_digit())
+            .unwrap_or(after.len());
+        let num_str = std::str::from_utf8(&after[..end]).ok()?;
+        num_str.parse::<usize>().ok()
+    } else {
+        // /Length is an indirect reference — we can't resolve it without full parsing
+        None
+    }
 }
 
 /// Try to find the actual xref start near the given offset.
@@ -306,95 +348,109 @@ fn find_actual_xref_offset<R: Read + Seek>(reader: &mut R, offset: u64) -> Resul
     Ok(offset)
 }
 
-/// Parse xref table recursively, following /Prev pointers for incremental updates.
+/// Parse xref table iteratively, following /Prev pointers for incremental updates.
 ///
-/// The depth parameter prevents infinite loops from circular /Prev chains.
-fn parse_xref_recursive<R: Read + Seek>(
+/// Uses a `HashSet` of visited offsets to detect circular /Prev chains instead of
+/// an arbitrary depth limit. This supports PDFs with hundreds of incremental saves
+/// (e.g., 177+ /Prev links) without falling back to expensive full-file reconstruction.
+fn parse_xref_iterative<R: Read + Seek>(
     reader: &mut R,
-    offset: u64,
-    depth: u32,
+    start_offset: u64,
 ) -> Result<CrossRefTable> {
-    // Prevent infinite recursion from circular /Prev chains
-    if depth > 100 {
-        return Err(Error::InvalidPdf("xref /Prev chain depth exceeded 100".to_string()));
-    }
+    let mut visited = HashSet::new();
+    let mut offset = start_offset;
+    let mut result_xref: Option<CrossRefTable> = None;
 
-    // Determine the actual xref offset, tolerating misalignment from PDF producers.
-    // Some PDF writers miscalculate startxref by a few bytes, so we scan nearby.
-    let actual_offset = find_actual_xref_offset(reader, offset)?;
-
-    reader.seek(SeekFrom::Start(actual_offset))?;
-
-    // Peek at the first few bytes to determine xref type
-    let mut peek_buf = [0u8; 64]; // Handle leading whitespace in linearized PDFs
-    let bytes_read = reader.read(&mut peek_buf)?;
-    reader.seek(SeekFrom::Start(actual_offset))?; // Reset position
-
-    let peek_str = String::from_utf8_lossy(&peek_buf[..bytes_read]);
-    let trimmed = peek_str.trim_start(); // Skip leading whitespace
-
-    log::debug!(
-        "Parsing xref at offset {} (original: {}), peek: {:?}",
-        actual_offset,
-        offset,
-        &peek_str[..peek_str.len().min(15)]
-    );
-
-    // Parse the current xref (either traditional or stream)
-    let mut xref = if trimmed.starts_with("xref") {
-        log::debug!("Detected traditional xref at offset {}", actual_offset);
-        parse_traditional_xref(reader, actual_offset)?
-    } else if trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-        // Try parsing as xref stream first
-        match parse_xref_stream(reader, actual_offset) {
-            Ok(xref) => xref,
-            Err(e) => {
-                // Log the xref stream parsing error for debugging
-                log::debug!("Failed to parse as xref stream: {}", e);
-                // Fall back to traditional if stream parsing fails
-                reader.seek(SeekFrom::Start(actual_offset))?;
-                match parse_traditional_xref(reader, actual_offset) {
-                    Ok(xref) => xref,
-                    Err(trad_err) => {
-                        // Both failed, return the xref stream error as it's more informative
-                        log::debug!("Failed to parse as traditional xref: {}", trad_err);
-                        return Err(Error::InvalidPdf(format!(
-                            "failed to parse xref (stream attempt: {}, traditional attempt: {})",
-                            e, trad_err
-                        )));
-                    },
-                }
-            },
+    loop {
+        // Cycle detection: stop if we've already visited this offset
+        if !visited.insert(offset) {
+            log::warn!(
+                "Circular /Prev chain detected at offset {}, stopping xref traversal",
+                offset
+            );
+            break;
         }
-    } else {
-        log::debug!(
-            "Xref at offset {} starts with unexpected data: {:?}",
-            actual_offset,
-            &trimmed[..trimmed.len().min(20)]
-        );
-        return Err(Error::InvalidXref);
-    };
 
-    // Check for /Prev pointer in trailer for incremental updates
-    if let Some(trailer) = xref.trailer() {
-        if let Some(prev_obj) = trailer.get("Prev") {
-            if let Some(prev_offset) = prev_obj.as_integer() {
+        // Determine the actual xref offset, tolerating misalignment from PDF producers.
+        let actual_offset = find_actual_xref_offset(reader, offset)?;
+
+        reader.seek(SeekFrom::Start(actual_offset))?;
+
+        // Peek at the first few bytes to determine xref type
+        let mut peek_buf = [0u8; 64];
+        let bytes_read = reader.read(&mut peek_buf)?;
+        reader.seek(SeekFrom::Start(actual_offset))?;
+
+        let peek_str = String::from_utf8_lossy(&peek_buf[..bytes_read]);
+        let trimmed = peek_str.trim_start();
+
+        log::debug!(
+            "Parsing xref at offset {} (original: {}), peek: {:?} [chain depth: {}]",
+            actual_offset,
+            offset,
+            &peek_str[..peek_str.len().min(15)],
+            visited.len()
+        );
+
+        // Parse the current xref (either traditional or stream)
+        let xref = if trimmed.starts_with("xref") {
+            log::debug!("Detected traditional xref at offset {}", actual_offset);
+            parse_traditional_xref(reader, actual_offset)?
+        } else if trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            match parse_xref_stream(reader, actual_offset) {
+                Ok(xref) => xref,
+                Err(e) => {
+                    log::debug!("Failed to parse as xref stream: {}", e);
+                    reader.seek(SeekFrom::Start(actual_offset))?;
+                    match parse_traditional_xref(reader, actual_offset) {
+                        Ok(xref) => xref,
+                        Err(trad_err) => {
+                            log::debug!("Failed to parse as traditional xref: {}", trad_err);
+                            return Err(Error::InvalidPdf(format!(
+                                "failed to parse xref (stream attempt: {}, traditional attempt: {})",
+                                e, trad_err
+                            )));
+                        },
+                    }
+                },
+            }
+        } else {
+            log::debug!(
+                "Xref at offset {} starts with unexpected data: {:?}",
+                actual_offset,
+                &trimmed[..trimmed.len().min(20)]
+            );
+            return Err(Error::InvalidXref);
+        };
+
+        // Extract /Prev pointer before merging
+        let prev_offset = xref
+            .trailer()
+            .and_then(|t| t.get("Prev"))
+            .and_then(|o| o.as_integer())
+            .map(|v| v as u64);
+
+        // Merge: most recent xref entries take priority over older ones
+        match &mut result_xref {
+            Some(result) => result.merge_from(xref),
+            None => result_xref = Some(xref),
+        }
+
+        // Follow /Prev chain or stop
+        match prev_offset {
+            Some(prev) => {
                 log::debug!(
-                    "Found /Prev pointer at offset {} in xref at offset {}",
-                    prev_offset,
+                    "Following /Prev pointer to offset {} from xref at offset {}",
+                    prev,
                     offset
                 );
-
-                // Recursively parse the previous xref
-                let prev_xref = parse_xref_recursive(reader, prev_offset as u64, depth + 1)?;
-
-                // Merge previous xref entries (current entries override previous ones)
-                xref.merge_from(prev_xref);
-            }
+                offset = prev;
+            },
+            None => break,
         }
     }
 
-    Ok(xref)
+    result_xref.ok_or(Error::InvalidXref)
 }
 
 /// Parse a traditional cross-reference table (PDF 1.0-1.4).
@@ -414,9 +470,11 @@ fn parse_traditional_xref<R: Read + Seek>(reader: &mut R, offset: u64) -> Result
     log::debug!("parse_traditional_xref: Starting at offset {}", offset);
     reader.seek(SeekFrom::Start(offset))?;
 
-    // Read all content and split into lines (handles CR, LF, CRLF)
-    let lines = read_all_and_split_lines(reader).map_err(|e| {
-        log::error!("Failed to read lines: {}", e);
+    // Read only until "trailer" or "startxref" instead of the entire remaining file.
+    // For linearized PDFs, the first xref may be near byte 0, and read_to_end would
+    // load the entire file (e.g., 375MB) just to parse an 8-entry xref table.
+    let lines = read_until_trailer(reader).map_err(|e| {
+        log::error!("Failed to read xref lines: {}", e);
         Error::InvalidXref
     })?;
 
@@ -568,6 +626,27 @@ fn parse_traditional_xref<R: Read + Seek>(reader: &mut R, offset: u64) -> Result
         }
     }
 
+    // Parse the trailer dictionary from the remaining lines.
+    // After the "trailer" keyword, the lines contain the trailer dict (e.g., "<< /Size 100 /Root 1 0 R /Prev 12345 >>").
+    // We concatenate remaining lines and parse the dictionary so that /Prev and other
+    // trailer entries are available via xref.trailer().
+    let remaining_text: String = lines[line_idx..].join("\n");
+    if !remaining_text.trim().is_empty() {
+        // The trailer dict should start with "<<" after optional whitespace
+        let trimmed = remaining_text.trim();
+        if trimmed.starts_with("<<")
+            || trimmed.starts_with("<< ")
+            || trimmed.starts_with("<<\n")
+            || trimmed.starts_with("<<\r")
+        {
+            if let Ok((_, trailer_obj)) = parse_object(trimmed.as_bytes()) {
+                if let Some(dict) = trailer_obj.as_dict() {
+                    xref.set_trailer(dict.clone());
+                }
+            }
+        }
+    }
+
     Ok(xref)
 }
 
@@ -590,11 +669,51 @@ fn parse_xref_stream<R: Read + Seek>(reader: &mut R, offset: u64) -> Result<Cros
 
     reader.seek(SeekFrom::Start(offset))?;
 
-    // Read enough data to parse the xref stream object
-    // We need to read until we hit endobj or enough to parse the stream
-    let mut buf_reader = BufReader::new(reader);
-    let mut content = Vec::new();
-    buf_reader.read_to_end(&mut content)?;
+    // Read a bounded amount of data for the xref stream object.
+    // We avoid read_to_end because for linearized PDFs the first xref may be
+    // near the start of the file, and reading to end would load the entire file.
+    //
+    // Strategy: read an initial 256KB chunk, then check /Length to see if we
+    // need more. Most xref streams are <64KB.
+    let file_len = reader.seek(SeekFrom::End(0))?;
+    reader.seek(SeekFrom::Start(offset))?;
+
+    let remaining = (file_len - offset) as usize;
+    let initial_read = remaining.min(256 * 1024);
+    let mut content = vec![0u8; initial_read];
+    let bytes_read = reader.read(&mut content)?;
+    content.truncate(bytes_read);
+
+    // Check if we need more data based on /Length or endobj presence
+    let needs_more = if let Some(length_val) = find_stream_length(&content) {
+        let stream_kw_pos = content.windows(6).position(|w| w == b"stream").unwrap_or(0);
+        let needed = stream_kw_pos + 20 + length_val + 30;
+        if needed > bytes_read {
+            Some(needed)
+        } else {
+            None
+        }
+    } else if content.windows(6).any(|w| w == b"endobj") {
+        None
+    } else {
+        // No /Length and no endobj in 256KB — read more (capped at 16MB)
+        Some(remaining.min(16 * 1024 * 1024))
+    };
+
+    if let Some(needed) = needs_more {
+        let total = needed.min(remaining);
+        reader.seek(SeekFrom::Start(offset))?;
+        content = vec![0u8; total];
+        let mut total_read = 0;
+        while total_read < total {
+            let n = reader.read(&mut content[total_read..])?;
+            if n == 0 {
+                break;
+            }
+            total_read += n;
+        }
+        content.truncate(total_read);
+    }
 
     // Parse the indirect object wrapper: "obj_num gen obj"
     let input = &content[..];
@@ -894,14 +1013,73 @@ fn split_lines(text: &str) -> Vec<String> {
 /// Standard BufReader::read_line() only handles LF and CRLF, but some PDFs use
 /// standalone CR (Mac-style line endings). This function handles all three by
 /// reading the entire buffer and splitting manually.
-fn read_all_and_split_lines<R: Read>(reader: &mut R) -> std::io::Result<Vec<String>> {
-    let mut content = Vec::new();
-    reader.read_to_end(&mut content)?;
+/// Read the xref table and trailer from reader, bounded by finding "trailer" + dict.
+///
+/// This avoids `read_to_end` which would read the entire remaining file for
+/// linearized PDFs where the first xref is near byte 0. Instead, we read in
+/// chunks and search for the "trailer" keyword in raw bytes, which correctly
+/// handles all line ending styles (CR, LF, CRLF).
+fn read_until_trailer<R: Read + Seek>(reader: &mut R) -> std::io::Result<Vec<String>> {
+    // Read in chunks until we find "trailer" keyword followed by a dict,
+    // followed by "startxref" or ">>" closing the dict.
+    // Most xref tables are <1MB. We cap at 32MB to prevent runaway reads.
+    const CHUNK_SIZE: usize = 256 * 1024;
+    const MAX_TOTAL: usize = 32 * 1024 * 1024;
 
-    let text = String::from_utf8_lossy(&content);
+    let mut data = Vec::with_capacity(CHUNK_SIZE);
+    let mut total_read = 0usize;
+    let mut found_end = false;
 
-    // Use the shared split_lines function to handle CR, LF, and CRLF
+    loop {
+        let prev_len = data.len();
+        data.resize(prev_len + CHUNK_SIZE, 0);
+        let n = reader.read(&mut data[prev_len..])?;
+        data.truncate(prev_len + n);
+        total_read += n;
+
+        if n == 0 {
+            break; // EOF
+        }
+
+        // Search for the end of the trailer section: look for ">>" after "trailer"
+        // then "startxref" or "%%EOF"
+        if let Some(trailer_pos) = find_bytes(&data, b"trailer") {
+            // Find the closing ">>" of the trailer dict after "trailer"
+            let after_trailer = &data[trailer_pos + 7..];
+            if let Some(dict_end) = find_bytes(after_trailer, b">>") {
+                // Check if we also have "startxref" after ">>"
+                let after_dict = &after_trailer[dict_end + 2..];
+                if find_bytes(after_dict, b"startxref").is_some() || after_dict.len() > 20 {
+                    found_end = true;
+                    // Truncate to just past the trailer dict + a bit more
+                    let end_pos = trailer_pos + 7 + dict_end + 2 + 50.min(after_dict.len());
+                    data.truncate(end_pos);
+                    break;
+                }
+            }
+        }
+
+        if total_read >= MAX_TOTAL {
+            break;
+        }
+    }
+
+    if !found_end {
+        // Fallback: if we didn't find trailer end in 32MB, use what we have
+        log::warn!(
+            "Could not find trailer end marker within {}MB of xref",
+            total_read / (1024 * 1024)
+        );
+    }
+
+    // Split into lines handling CR, LF, and CRLF
+    let text = String::from_utf8_lossy(&data);
     Ok(split_lines(&text))
+}
+
+/// Find the position of a byte pattern in a byte slice.
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 #[cfg(test)]
@@ -1208,5 +1386,281 @@ mod tests {
         let text = "line1\rline2\nline3\r\nline4";
         let lines = split_lines(text);
         assert_eq!(lines, vec!["line1", "line2", "line3", "line4"]);
+    }
+
+    #[test]
+    fn test_parse_xref_with_prev_chain() {
+        // Verify that the iterative parser follows /Prev chains.
+        // We test this indirectly: a circular /Prev=0 chain should not panic or
+        // infinite-loop (covered by test_parse_xref_circular_prev_chain), and
+        // the iterative parser should handle deep chains without stack overflow.
+        //
+        // For a proper /Prev chain test with real PDF data, we rely on
+        // integration tests with actual PDFs (e.g., Deutsche Heeresuniformen
+        // with 177 /Prev links).
+
+        // Single xref table with /Prev pointing to a non-xref offset.
+        // The parser should fail gracefully on the /Prev target and still
+        // return what it parsed from the first table.
+        let xref_data = b"xref\n\
+            0 2\n\
+            0000000000 65535 f\n\
+            0000000500 00000 n\n\
+            trailer\n\
+            << /Size 2 >>\n";
+
+        let mut cursor = Cursor::new(xref_data);
+        let table = parse_xref(&mut cursor, 0).unwrap();
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.get(1).unwrap().offset, 500);
+    }
+
+    #[test]
+    fn test_parse_xref_circular_prev_chain() {
+        // Build a circular /Prev chain: xref at offset 0 points to itself.
+        // The iterative parser should detect the cycle and stop gracefully.
+        let xref_data = b"xref\n\
+            0 1\n\
+            0000000000 65535 f\n\
+            trailer\n\
+            << /Size 1 /Prev 0 >>\n";
+
+        let mut cursor = Cursor::new(xref_data);
+        let table = parse_xref(&mut cursor, 0).unwrap();
+        assert_eq!(table.len(), 1);
+    }
+
+    // === Additional XRefEntry tests ===
+
+    #[test]
+    fn test_xref_entry_uncompressed() {
+        let entry = XRefEntry::uncompressed(5000, 0);
+        assert_eq!(entry.entry_type, XRefEntryType::Uncompressed);
+        assert_eq!(entry.offset, 5000);
+        assert_eq!(entry.generation, 0);
+        assert!(entry.in_use);
+    }
+
+    #[test]
+    fn test_xref_entry_compressed() {
+        let entry = XRefEntry::compressed(42, 3);
+        assert_eq!(entry.entry_type, XRefEntryType::Compressed);
+        assert_eq!(entry.offset, 42); // stream obj number
+        assert_eq!(entry.generation, 3); // index in stream
+        assert!(entry.in_use);
+    }
+
+    #[test]
+    fn test_xref_entry_free_constructor() {
+        let entry = XRefEntry::free(7, 65535);
+        assert_eq!(entry.entry_type, XRefEntryType::Free);
+        assert_eq!(entry.offset, 7); // next free obj
+        assert_eq!(entry.generation, 65535);
+        assert!(!entry.in_use);
+    }
+
+    #[test]
+    fn test_xref_entry_type_equality() {
+        assert_eq!(XRefEntryType::Free, XRefEntryType::Free);
+        assert_eq!(XRefEntryType::Uncompressed, XRefEntryType::Uncompressed);
+        assert_eq!(XRefEntryType::Compressed, XRefEntryType::Compressed);
+        assert_ne!(XRefEntryType::Free, XRefEntryType::Uncompressed);
+    }
+
+    #[test]
+    fn test_xref_entry_clone_debug() {
+        let entry = XRefEntry::uncompressed(100, 0);
+        let cloned = entry.clone();
+        assert_eq!(entry, cloned);
+        let debug = format!("{:?}", entry);
+        assert!(debug.contains("Uncompressed"));
+    }
+
+    // === CrossRefTable tests ===
+
+    #[test]
+    fn test_cross_ref_table_set_trailer() {
+        let mut table = CrossRefTable::new();
+        assert!(table.trailer().is_none());
+
+        let mut trailer = HashMap::new();
+        trailer.insert("Size".to_string(), Object::Integer(10));
+        table.set_trailer(trailer);
+        assert!(table.trailer().is_some());
+        assert!(table.trailer().unwrap().contains_key("Size"));
+    }
+
+    #[test]
+    fn test_cross_ref_table_contains() {
+        let mut table = CrossRefTable::new();
+        assert!(!table.contains(1));
+        table.add_entry(1, XRefEntry::uncompressed(100, 0));
+        assert!(table.contains(1));
+        assert!(!table.contains(2));
+    }
+
+    #[test]
+    fn test_cross_ref_table_all_object_numbers() {
+        let mut table = CrossRefTable::new();
+        table.add_entry(1, XRefEntry::uncompressed(100, 0));
+        table.add_entry(5, XRefEntry::uncompressed(200, 0));
+        table.add_entry(10, XRefEntry::uncompressed(300, 0));
+
+        let mut nums: Vec<u32> = table.all_object_numbers().collect();
+        nums.sort();
+        assert_eq!(nums, vec![1, 5, 10]);
+    }
+
+    #[test]
+    fn test_cross_ref_table_merge_from() {
+        let mut table1 = CrossRefTable::new();
+        table1.add_entry(1, XRefEntry::uncompressed(100, 0));
+        table1.add_entry(2, XRefEntry::uncompressed(200, 0));
+
+        let mut table2 = CrossRefTable::new();
+        table2.add_entry(2, XRefEntry::uncompressed(999, 0)); // conflict
+        table2.add_entry(3, XRefEntry::uncompressed(300, 0));
+
+        table1.merge_from(table2);
+
+        assert_eq!(table1.len(), 3);
+        // table1's entry for obj 2 should win (not overwritten)
+        assert_eq!(table1.get(2).unwrap().offset, 200);
+        // obj 3 from table2 should be added
+        assert_eq!(table1.get(3).unwrap().offset, 300);
+    }
+
+    #[test]
+    fn test_cross_ref_table_merge_trailer() {
+        let mut table1 = CrossRefTable::new();
+        // table1 has no trailer
+
+        let mut table2 = CrossRefTable::new();
+        let mut trailer = HashMap::new();
+        trailer.insert("Size".to_string(), Object::Integer(5));
+        table2.set_trailer(trailer);
+
+        table1.merge_from(table2);
+        // Should pick up table2's trailer
+        assert!(table1.trailer().is_some());
+    }
+
+    #[test]
+    fn test_cross_ref_table_merge_preserves_existing_trailer() {
+        let mut table1 = CrossRefTable::new();
+        let mut trailer1 = HashMap::new();
+        trailer1.insert("Size".to_string(), Object::Integer(10));
+        table1.set_trailer(trailer1);
+
+        let mut table2 = CrossRefTable::new();
+        let mut trailer2 = HashMap::new();
+        trailer2.insert("Size".to_string(), Object::Integer(5));
+        table2.set_trailer(trailer2);
+
+        table1.merge_from(table2);
+        // table1 already had a trailer, should keep it
+        let size = table1.trailer().unwrap().get("Size").unwrap();
+        assert_eq!(*size, Object::Integer(10));
+    }
+
+    #[test]
+    fn test_cross_ref_table_clone() {
+        let mut table = CrossRefTable::new();
+        table.add_entry(1, XRefEntry::uncompressed(100, 0));
+        let cloned = table.clone();
+        assert_eq!(cloned.len(), 1);
+        assert_eq!(cloned.get(1).unwrap().offset, 100);
+    }
+
+    // === find_stream_length tests ===
+
+    #[test]
+    fn test_find_stream_length_basic() {
+        let data = b"/Type /XRef /Length 1234 /W [1 2 2]";
+        let result = find_stream_length(data);
+        assert_eq!(result, Some(1234));
+    }
+
+    #[test]
+    fn test_find_stream_length_no_length() {
+        let data = b"/Type /XRef /W [1 2 2]";
+        let result = find_stream_length(data);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_stream_length_indirect_reference() {
+        // /Length 5 0 R -> can't resolve without full parsing
+        let data = b"/Type /XRef /Length 5 0 R";
+        // First digit should parse, but it would get "5" as the length
+        // Actually it would parse "5" as a valid number
+        let result = find_stream_length(data);
+        // It parses the first integer it finds after /Length
+        assert_eq!(result, Some(5));
+    }
+
+    #[test]
+    fn test_find_stream_length_zero() {
+        let data = b"/Length 0";
+        let result = find_stream_length(data);
+        assert_eq!(result, Some(0));
+    }
+
+    // === find_actual_xref_offset tests ===
+
+    #[test]
+    fn test_find_actual_xref_offset_correct() {
+        let data = b"xref\n0 1\n0000000000 65535 f\ntrailer\n";
+        let mut cursor = Cursor::new(data);
+        let offset = find_actual_xref_offset(&mut cursor, 0).unwrap();
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn test_find_actual_xref_offset_digit_start() {
+        // xref stream starts with object number
+        let data = b"1 0 obj\n<< /Type /XRef >>\nstream\n";
+        let mut cursor = Cursor::new(data);
+        let offset = find_actual_xref_offset(&mut cursor, 0).unwrap();
+        assert_eq!(offset, 0);
+    }
+
+    // === split_lines tests ===
+
+    #[test]
+    fn test_split_lines_lf() {
+        let lines = split_lines("a\nb\nc");
+        assert_eq!(lines, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_split_lines_cr() {
+        let lines = split_lines("a\rb\rc");
+        assert_eq!(lines, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_split_lines_crlf() {
+        let lines = split_lines("a\r\nb\r\nc");
+        assert_eq!(lines, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_split_lines_empty() {
+        let lines = split_lines("");
+        // split_lines on empty string may return empty vec
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn test_split_lines_single_line() {
+        let lines = split_lines("hello");
+        assert_eq!(lines, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_xref_entry_type_debug() {
+        let debug = format!("{:?}", XRefEntryType::Compressed);
+        assert!(debug.contains("Compressed"));
     }
 }

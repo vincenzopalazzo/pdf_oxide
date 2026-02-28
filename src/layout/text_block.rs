@@ -17,7 +17,7 @@ use std::collections::HashMap;
 /// - Preserves PDF's text positioning intent
 /// - Matches industry best practices (PyMuPDF, etc.)
 /// - More robust for complex layouts
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TextSpan {
     /// The complete text string
     pub text: String,
@@ -94,7 +94,7 @@ pub struct TextSpan {
 /// - `matrix`: Full 6-element transformation matrix for advanced use cases
 ///
 /// These properties match industry standards (MuPDF, iText, PDFBox, pdfium-render).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TextChar {
     /// The character itself
     pub char: char,
@@ -299,7 +299,7 @@ impl TextChar {
 ///
 /// PDF Spec: ISO 32000-1:2008, Table 122 - FontDescriptor
 /// Values: 100-900 where 400 = normal, 700 = bold
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[repr(u16)]
 #[derive(Default)]
 pub enum FontWeight {
@@ -356,7 +356,7 @@ impl FontWeight {
 }
 
 /// RGB color representation.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct Color {
     /// Red channel (0.0 - 1.0)
     pub r: f32,

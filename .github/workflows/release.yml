@@ -203,6 +203,48 @@ jobs:
           path: dist/*
           retention-days: 7
 
+  # Build WASM package
+  build-wasm:
+    name: Build WASM
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-wasm-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install wasm-bindgen-cli
+        run: cargo install wasm-bindgen-cli --version 0.2.106
+
+      - name: Build WASM binary
+        run: cargo build --lib --target wasm32-unknown-unknown --features wasm --release
+
+      - name: Generate bindings
+        run: |
+          wasm-bindgen --target nodejs --out-dir wasm-out/ \
+            target/wasm32-unknown-unknown/release/pdf_oxide.wasm
+
+      - name: Copy package files
+        run: |
+          cp wasm-pkg/package.json wasm-out/
+          cp wasm-pkg/README.md wasm-out/
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: wasm-package
+          path: wasm-out/
+          retention-days: 7
+
   # Build Python wheels
   build-python-wheels:
     name: Build Python wheels (${{ matrix.target }})
@@ -260,7 +302,7 @@ jobs:
   # Create GitHub Release
   create-release:
     name: Create GitHub Release
-    needs: [validate, build-binaries, build-python-wheels]
+    needs: [validate, build-binaries, build-python-wheels, build-wasm]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -341,3 +383,33 @@ jobs:
           password: ${{ secrets.PYPI_API_TOKEN }}
           packages-dir: wheels/
           skip-existing: true
+
+  # Publish to npm
+  publish-npm:
+    name: Publish to npm
+    needs: [validate, build-wasm, create-release]
+    runs-on: ubuntu-latest
+    if: ${{ !contains(needs.validate.outputs.version, '-') }}
+    steps:
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: wasm-package
+          path: wasm-out
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: List package contents
+        run: |
+          echo "=== WASM package contents ==="
+          ls -lh wasm-out/
+
+      - name: Publish to npm
+        working-directory: wasm-out
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

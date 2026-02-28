@@ -993,6 +993,7 @@ impl PolygonAnnotation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::annotation_types::BorderEffectStyle;
 
     // ========== Line Annotation Tests ==========
 
@@ -1150,5 +1151,654 @@ mod tests {
         assert!(rect.y < 50.0);
         assert!(rect.x + rect.width > 150.0);
         assert!(rect.y + rect.height > 150.0);
+    }
+
+    // ========== Additional Coverage Tests ==========
+
+    // --- CaptionPosition tests ---
+
+    #[test]
+    fn test_caption_position_pdf_name() {
+        assert_eq!(CaptionPosition::Inline.pdf_name(), "Inline");
+        assert_eq!(CaptionPosition::Top.pdf_name(), "Top");
+    }
+
+    #[test]
+    fn test_caption_position_default() {
+        let pos = CaptionPosition::default();
+        assert_eq!(pos, CaptionPosition::Inline);
+    }
+
+    // --- ShapeType tests ---
+
+    #[test]
+    fn test_shape_type_pdf_name() {
+        assert_eq!(ShapeType::Square.pdf_name(), "Square");
+        assert_eq!(ShapeType::Circle.pdf_name(), "Circle");
+    }
+
+    // --- PolygonType tests ---
+
+    #[test]
+    fn test_polygon_type_pdf_name() {
+        assert_eq!(PolygonType::Polygon.pdf_name(), "Polygon");
+        assert_eq!(PolygonType::PolyLine.pdf_name(), "PolyLine");
+    }
+
+    // --- LineAnnotation builder method tests ---
+
+    #[test]
+    fn test_line_annotation_dimension() {
+        let line = LineAnnotation::dimension((50.0, 50.0), (200.0, 50.0), 20.0);
+        assert_eq!(line.line_endings.0, LineEndingStyle::OpenArrow);
+        assert_eq!(line.line_endings.1, LineEndingStyle::OpenArrow);
+        assert_eq!(line.leader_line, Some(20.0));
+    }
+
+    #[test]
+    fn test_line_annotation_with_stroke_color() {
+        let line = LineAnnotation::new((0.0, 0.0), (100.0, 100.0)).with_stroke_color(1.0, 0.0, 0.0);
+        match line.color {
+            Some(AnnotationColor::Rgb(r, g, b)) => {
+                assert!((r - 1.0).abs() < 0.001);
+                assert!((g - 0.0).abs() < 0.001);
+                assert!((b - 0.0).abs() < 0.001);
+            },
+            _ => panic!("Expected RGB color"),
+        }
+    }
+
+    #[test]
+    fn test_line_annotation_with_fill_color() {
+        let line = LineAnnotation::new((0.0, 0.0), (100.0, 100.0)).with_fill_color(0.0, 1.0, 0.0);
+        assert!(line.interior_color.is_some());
+    }
+
+    #[test]
+    fn test_line_annotation_with_line_width() {
+        let line = LineAnnotation::new((0.0, 0.0), (100.0, 100.0)).with_line_width(3.0);
+        assert_eq!(line.line_width, Some(3.0));
+    }
+
+    #[test]
+    fn test_line_annotation_with_border_style() {
+        let line = LineAnnotation::new((0.0, 0.0), (100.0, 100.0))
+            .with_border_style(BorderStyleType::Dashed);
+        assert_eq!(line.border_style, Some(BorderStyleType::Dashed));
+    }
+
+    #[test]
+    fn test_line_annotation_with_leader_line() {
+        let line = LineAnnotation::new((0.0, 0.0), (100.0, 100.0)).with_leader_line(15.0);
+        assert_eq!(line.leader_line, Some(15.0));
+    }
+
+    #[test]
+    fn test_line_annotation_with_leader_offset() {
+        let line = LineAnnotation::new((0.0, 0.0), (100.0, 100.0)).with_leader_offset(5.0);
+        assert_eq!(line.leader_line_offset, Some(5.0));
+    }
+
+    #[test]
+    fn test_line_annotation_with_opacity() {
+        let line = LineAnnotation::new((0.0, 0.0), (100.0, 100.0)).with_opacity(0.5);
+        assert_eq!(line.opacity, Some(0.5));
+    }
+
+    #[test]
+    fn test_line_annotation_opacity_clamped() {
+        let line = LineAnnotation::new((0.0, 0.0), (100.0, 100.0)).with_opacity(1.5);
+        assert_eq!(line.opacity, Some(1.0)); // Clamped to 1.0
+
+        let line2 = LineAnnotation::new((0.0, 0.0), (100.0, 100.0)).with_opacity(-0.5);
+        assert_eq!(line2.opacity, Some(0.0)); // Clamped to 0.0
+    }
+
+    #[test]
+    fn test_line_annotation_with_author() {
+        let line = LineAnnotation::new((0.0, 0.0), (100.0, 100.0)).with_author("John");
+        assert_eq!(line.author, Some("John".to_string()));
+    }
+
+    #[test]
+    fn test_line_annotation_with_subject() {
+        let line = LineAnnotation::new((0.0, 0.0), (100.0, 100.0)).with_subject("Measurement");
+        assert_eq!(line.subject, Some("Measurement".to_string()));
+    }
+
+    #[test]
+    fn test_line_annotation_with_flags() {
+        let flags = AnnotationFlags::new(AnnotationFlags::PRINT | AnnotationFlags::LOCKED);
+        let line = LineAnnotation::new((0.0, 0.0), (100.0, 100.0)).with_flags(flags);
+        assert_eq!(line.flags.bits(), AnnotationFlags::PRINT | AnnotationFlags::LOCKED);
+    }
+
+    #[test]
+    fn test_line_annotation_calculate_rect() {
+        let line = LineAnnotation::new((50.0, 100.0), (200.0, 300.0));
+        let rect = line.calculate_rect();
+        // Should encompass both points with margin
+        assert!(rect.x < 50.0);
+        assert!(rect.y < 100.0);
+        assert!(rect.x as f64 + rect.width as f64 > 200.0);
+        assert!(rect.y as f64 + rect.height as f64 > 300.0);
+    }
+
+    #[test]
+    fn test_line_annotation_build_full() {
+        let line = LineAnnotation::new((100.0, 200.0), (300.0, 400.0))
+            .with_stroke_color(1.0, 0.0, 0.0)
+            .with_fill_color(0.0, 1.0, 0.0)
+            .with_line_width(2.0)
+            .with_border_style(BorderStyleType::Solid)
+            .with_opacity(0.8)
+            .with_leader_line(10.0)
+            .with_leader_offset(5.0)
+            .with_caption("Test caption")
+            .with_caption_position(CaptionPosition::Top)
+            .with_author("Author")
+            .with_subject("Subject")
+            .with_line_endings(LineEndingStyle::OpenArrow, LineEndingStyle::ClosedArrow);
+
+        let dict = line.build(&[]);
+
+        assert_eq!(dict.get("Type"), Some(&Object::Name("Annot".to_string())));
+        assert_eq!(dict.get("Subtype"), Some(&Object::Name("Line".to_string())));
+        assert!(dict.contains_key("L"));
+        assert!(dict.contains_key("LE"));
+        assert!(dict.contains_key("C"));
+        assert!(dict.contains_key("IC"));
+        assert!(dict.contains_key("CA"));
+        assert!(dict.contains_key("BS"));
+        assert!(dict.contains_key("LL"));
+        assert!(dict.contains_key("LLO"));
+        assert!(dict.contains_key("Cap"));
+        assert!(dict.contains_key("CP"));
+        assert!(dict.contains_key("Contents"));
+        assert!(dict.contains_key("T")); // Author
+        assert!(dict.contains_key("Subj")); // Subject
+        assert!(dict.contains_key("F")); // Flags
+    }
+
+    #[test]
+    fn test_line_annotation_build_leader_line_extension() {
+        let mut line = LineAnnotation::new((0.0, 0.0), (100.0, 100.0));
+        line.leader_line_extension = Some(5.0);
+        let dict = line.build(&[]);
+        assert_eq!(dict.get("LLE"), Some(&Object::Real(5.0)));
+    }
+
+    #[test]
+    fn test_line_annotation_build_no_caption_cp() {
+        // Without caption enabled, CP should not appear
+        let line = LineAnnotation::new((0.0, 0.0), (100.0, 100.0))
+            .with_caption_position(CaptionPosition::Top);
+        // caption is false
+        let dict = line.build(&[]);
+        assert!(!dict.contains_key("Cap"));
+        assert!(!dict.contains_key("CP"));
+    }
+
+    #[test]
+    fn test_line_annotation_build_caption_inline_no_cp() {
+        // With caption and inline position, CP should not appear
+        let line = LineAnnotation::new((0.0, 0.0), (100.0, 100.0)).with_caption("Test");
+        // caption_position defaults to Inline
+        let dict = line.build(&[]);
+        assert!(dict.contains_key("Cap"));
+        assert!(!dict.contains_key("CP")); // Inline is default, don't write CP
+    }
+
+    #[test]
+    fn test_line_annotation_build_all_border_styles() {
+        for style in &[
+            BorderStyleType::Solid,
+            BorderStyleType::Dashed,
+            BorderStyleType::Beveled,
+            BorderStyleType::Inset,
+            BorderStyleType::Underline,
+        ] {
+            let line = LineAnnotation::new((0.0, 0.0), (100.0, 100.0)).with_border_style(*style);
+            let dict = line.build(&[]);
+            assert!(dict.contains_key("BS"));
+            match dict.get("BS") {
+                Some(Object::Dictionary(bs)) => {
+                    assert!(bs.contains_key("S"));
+                },
+                _ => panic!("Expected BS dictionary"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_line_annotation_build_no_line_endings() {
+        // Default line endings are None/None, so LE should not appear
+        let line = LineAnnotation::new((0.0, 0.0), (100.0, 100.0));
+        let dict = line.build(&[]);
+        assert!(!dict.contains_key("LE"));
+    }
+
+    // --- ShapeAnnotation builder method tests ---
+
+    #[test]
+    fn test_shape_annotation_with_no_fill() {
+        let shape = ShapeAnnotation::square(Rect::new(0.0, 0.0, 100.0, 100.0))
+            .with_fill_color(1.0, 0.0, 0.0)
+            .with_no_fill();
+        assert!(shape.interior_color.is_none());
+    }
+
+    #[test]
+    fn test_shape_annotation_with_border_width() {
+        let shape =
+            ShapeAnnotation::square(Rect::new(0.0, 0.0, 100.0, 100.0)).with_border_width(3.0);
+        assert_eq!(shape.border_width, Some(3.0));
+    }
+
+    #[test]
+    fn test_shape_annotation_with_border_style() {
+        let shape = ShapeAnnotation::circle(Rect::new(0.0, 0.0, 100.0, 100.0))
+            .with_border_style(BorderStyleType::Dashed);
+        assert_eq!(shape.border_style, Some(BorderStyleType::Dashed));
+    }
+
+    #[test]
+    fn test_shape_annotation_with_border_effect() {
+        let effect = BorderEffect {
+            style: BorderEffectStyle::Cloudy,
+            intensity: 1.5,
+        };
+        let shape =
+            ShapeAnnotation::square(Rect::new(0.0, 0.0, 100.0, 100.0)).with_border_effect(effect);
+        assert!(shape.border_effect.is_some());
+    }
+
+    #[test]
+    fn test_shape_annotation_with_opacity() {
+        let shape = ShapeAnnotation::square(Rect::new(0.0, 0.0, 100.0, 100.0)).with_opacity(0.5);
+        assert_eq!(shape.opacity, Some(0.5));
+    }
+
+    #[test]
+    fn test_shape_annotation_opacity_clamped() {
+        let shape = ShapeAnnotation::square(Rect::new(0.0, 0.0, 100.0, 100.0)).with_opacity(2.0);
+        assert_eq!(shape.opacity, Some(1.0));
+    }
+
+    #[test]
+    fn test_shape_annotation_with_contents() {
+        let shape =
+            ShapeAnnotation::square(Rect::new(0.0, 0.0, 100.0, 100.0)).with_contents("A note");
+        assert_eq!(shape.contents, Some("A note".to_string()));
+    }
+
+    #[test]
+    fn test_shape_annotation_with_author() {
+        let shape = ShapeAnnotation::circle(Rect::new(0.0, 0.0, 100.0, 100.0)).with_author("Jane");
+        assert_eq!(shape.author, Some("Jane".to_string()));
+    }
+
+    #[test]
+    fn test_shape_annotation_with_subject() {
+        let shape =
+            ShapeAnnotation::circle(Rect::new(0.0, 0.0, 100.0, 100.0)).with_subject("Review");
+        assert_eq!(shape.subject, Some("Review".to_string()));
+    }
+
+    #[test]
+    fn test_shape_annotation_with_flags() {
+        let flags = AnnotationFlags::new(AnnotationFlags::HIDDEN);
+        let shape = ShapeAnnotation::square(Rect::new(0.0, 0.0, 100.0, 100.0)).with_flags(flags);
+        assert_eq!(shape.flags.bits(), AnnotationFlags::HIDDEN);
+    }
+
+    #[test]
+    fn test_shape_annotation_build_full() {
+        let effect = BorderEffect {
+            style: BorderEffectStyle::Cloudy,
+            intensity: 1.0,
+        };
+        let shape = ShapeAnnotation::square(Rect::new(50.0, 50.0, 200.0, 150.0))
+            .with_stroke_color(0.0, 0.0, 1.0)
+            .with_fill_color(0.9, 0.9, 1.0)
+            .with_border_width(2.0)
+            .with_border_style(BorderStyleType::Solid)
+            .with_border_effect(effect)
+            .with_opacity(0.7)
+            .with_contents("Comment text")
+            .with_author("Author")
+            .with_subject("Subject");
+
+        let dict = shape.build(&[]);
+
+        assert_eq!(dict.get("Type"), Some(&Object::Name("Annot".to_string())));
+        assert_eq!(dict.get("Subtype"), Some(&Object::Name("Square".to_string())));
+        assert!(dict.contains_key("Rect"));
+        assert!(dict.contains_key("C"));
+        assert!(dict.contains_key("IC"));
+        assert!(dict.contains_key("CA"));
+        assert!(dict.contains_key("BS"));
+        assert!(dict.contains_key("BE"));
+        assert!(dict.contains_key("Contents"));
+        assert!(dict.contains_key("T"));
+        assert!(dict.contains_key("Subj"));
+        assert!(dict.contains_key("F"));
+    }
+
+    #[test]
+    fn test_shape_annotation_build_border_effect_no_intensity() {
+        let effect = BorderEffect {
+            style: BorderEffectStyle::None,
+            intensity: 0.0,
+        };
+        let shape =
+            ShapeAnnotation::square(Rect::new(0.0, 0.0, 100.0, 100.0)).with_border_effect(effect);
+
+        let dict = shape.build(&[]);
+        match dict.get("BE") {
+            Some(Object::Dictionary(be)) => {
+                // Intensity is 0.0, should not appear
+                assert!(!be.contains_key("I"));
+            },
+            _ => panic!("Expected BE dictionary"),
+        }
+    }
+
+    #[test]
+    fn test_shape_annotation_rect_differences() {
+        let mut shape = ShapeAnnotation::square(Rect::new(0.0, 0.0, 100.0, 100.0));
+        shape.rect_differences = Some([5.0, 5.0, 5.0, 5.0]);
+
+        let dict = shape.build(&[]);
+        assert!(dict.contains_key("RD"));
+        match dict.get("RD") {
+            Some(Object::Array(arr)) => assert_eq!(arr.len(), 4),
+            _ => panic!("Expected RD array"),
+        }
+    }
+
+    #[test]
+    fn test_shape_annotation_build_all_border_styles() {
+        for style in &[
+            BorderStyleType::Solid,
+            BorderStyleType::Dashed,
+            BorderStyleType::Beveled,
+            BorderStyleType::Inset,
+            BorderStyleType::Underline,
+        ] {
+            let shape = ShapeAnnotation::circle(Rect::new(0.0, 0.0, 100.0, 100.0))
+                .with_border_style(*style);
+            let dict = shape.build(&[]);
+            assert!(dict.contains_key("BS"));
+        }
+    }
+
+    // --- PolygonAnnotation builder method tests ---
+
+    #[test]
+    fn test_polygon_with_stroke_color() {
+        let polygon = PolygonAnnotation::polygon(vec![(0.0, 0.0), (100.0, 0.0), (50.0, 100.0)])
+            .with_stroke_color(1.0, 0.0, 0.0);
+        assert!(polygon.color.is_some());
+    }
+
+    #[test]
+    fn test_polygon_with_fill_color() {
+        let polygon = PolygonAnnotation::polygon(vec![(0.0, 0.0), (100.0, 0.0), (50.0, 100.0)])
+            .with_fill_color(0.0, 1.0, 0.0);
+        assert!(polygon.interior_color.is_some());
+    }
+
+    #[test]
+    fn test_polygon_with_no_fill() {
+        let polygon = PolygonAnnotation::polygon(vec![(0.0, 0.0), (100.0, 0.0), (50.0, 100.0)])
+            .with_fill_color(1.0, 0.0, 0.0)
+            .with_no_fill();
+        assert!(polygon.interior_color.is_none());
+    }
+
+    #[test]
+    fn test_polygon_with_border_width() {
+        let polygon =
+            PolygonAnnotation::polygon(vec![(0.0, 0.0), (100.0, 0.0)]).with_border_width(3.0);
+        assert_eq!(polygon.border_width, Some(3.0));
+    }
+
+    #[test]
+    fn test_polygon_with_border_style() {
+        let polygon = PolygonAnnotation::polygon(vec![(0.0, 0.0), (100.0, 0.0)])
+            .with_border_style(BorderStyleType::Beveled);
+        assert_eq!(polygon.border_style, Some(BorderStyleType::Beveled));
+    }
+
+    #[test]
+    fn test_polygon_with_border_effect() {
+        let effect = BorderEffect {
+            style: BorderEffectStyle::Cloudy,
+            intensity: 2.0,
+        };
+        let polygon =
+            PolygonAnnotation::polygon(vec![(0.0, 0.0), (100.0, 0.0)]).with_border_effect(effect);
+        assert!(polygon.border_effect.is_some());
+    }
+
+    #[test]
+    fn test_polygon_with_opacity() {
+        let polygon = PolygonAnnotation::polygon(vec![(0.0, 0.0)]).with_opacity(0.3);
+        assert_eq!(polygon.opacity, Some(0.3));
+    }
+
+    #[test]
+    fn test_polygon_opacity_clamped() {
+        let polygon = PolygonAnnotation::polygon(vec![]).with_opacity(-1.0);
+        assert_eq!(polygon.opacity, Some(0.0));
+    }
+
+    #[test]
+    fn test_polygon_with_contents() {
+        let polygon = PolygonAnnotation::polygon(vec![(0.0, 0.0)]).with_contents("Note");
+        assert_eq!(polygon.contents, Some("Note".to_string()));
+    }
+
+    #[test]
+    fn test_polygon_with_author() {
+        let polygon = PolygonAnnotation::polygon(vec![(0.0, 0.0)]).with_author("Bob");
+        assert_eq!(polygon.author, Some("Bob".to_string()));
+    }
+
+    #[test]
+    fn test_polygon_with_subject() {
+        let polygon = PolygonAnnotation::polygon(vec![(0.0, 0.0)]).with_subject("Area");
+        assert_eq!(polygon.subject, Some("Area".to_string()));
+    }
+
+    #[test]
+    fn test_polygon_with_flags() {
+        let flags = AnnotationFlags::new(AnnotationFlags::READ_ONLY);
+        let polygon = PolygonAnnotation::polygon(vec![(0.0, 0.0)]).with_flags(flags);
+        assert_eq!(polygon.flags.bits(), AnnotationFlags::READ_ONLY);
+    }
+
+    #[test]
+    fn test_polygon_calculate_rect_empty() {
+        let polygon = PolygonAnnotation::polygon(vec![]);
+        let rect = polygon.calculate_rect();
+        assert_eq!(rect.x, 0.0);
+        assert_eq!(rect.y, 0.0);
+        assert_eq!(rect.width, 0.0);
+        assert_eq!(rect.height, 0.0);
+    }
+
+    #[test]
+    fn test_polygon_build_full() {
+        let effect = BorderEffect {
+            style: BorderEffectStyle::Cloudy,
+            intensity: 1.5,
+        };
+        let polygon =
+            PolygonAnnotation::polygon(vec![(100.0, 100.0), (200.0, 100.0), (150.0, 200.0)])
+                .with_stroke_color(0.0, 0.0, 1.0)
+                .with_fill_color(0.8, 0.8, 1.0)
+                .with_border_width(2.0)
+                .with_border_style(BorderStyleType::Dashed)
+                .with_border_effect(effect)
+                .with_opacity(0.9)
+                .with_contents("Comment")
+                .with_author("Author")
+                .with_subject("Subject");
+
+        let dict = polygon.build(&[]);
+
+        assert_eq!(dict.get("Type"), Some(&Object::Name("Annot".to_string())));
+        assert_eq!(dict.get("Subtype"), Some(&Object::Name("Polygon".to_string())));
+        assert!(dict.contains_key("Vertices"));
+        assert!(dict.contains_key("C"));
+        assert!(dict.contains_key("IC"));
+        assert!(dict.contains_key("CA"));
+        assert!(dict.contains_key("BS"));
+        assert!(dict.contains_key("BE"));
+        assert!(dict.contains_key("Contents"));
+        assert!(dict.contains_key("T"));
+        assert!(dict.contains_key("Subj"));
+        assert!(dict.contains_key("F"));
+    }
+
+    #[test]
+    fn test_polyline_build_full() {
+        let polyline = PolygonAnnotation::polyline(vec![(0.0, 0.0), (50.0, 100.0), (100.0, 0.0)])
+            .with_line_endings(LineEndingStyle::Square, LineEndingStyle::Diamond)
+            .with_stroke_color(1.0, 0.0, 0.0);
+
+        let dict = polyline.build(&[]);
+
+        assert_eq!(dict.get("Subtype"), Some(&Object::Name("PolyLine".to_string())));
+        assert!(dict.contains_key("LE"));
+        assert!(dict.contains_key("Vertices"));
+    }
+
+    #[test]
+    fn test_polygon_line_endings_ignored_for_polygon() {
+        // Line endings should only appear for PolyLine, not Polygon
+        let polygon = PolygonAnnotation::polygon(vec![(0.0, 0.0), (100.0, 0.0), (50.0, 100.0)])
+            .with_line_endings(LineEndingStyle::OpenArrow, LineEndingStyle::ClosedArrow);
+
+        let dict = polygon.build(&[]);
+        // LE should NOT be in the dict for Polygon type
+        assert!(!dict.contains_key("LE"));
+    }
+
+    #[test]
+    fn test_polygon_build_all_border_styles() {
+        for style in &[
+            BorderStyleType::Solid,
+            BorderStyleType::Dashed,
+            BorderStyleType::Beveled,
+            BorderStyleType::Inset,
+            BorderStyleType::Underline,
+        ] {
+            let polygon = PolygonAnnotation::polygon(vec![(0.0, 0.0), (100.0, 100.0)])
+                .with_border_style(*style);
+            let dict = polygon.build(&[]);
+            assert!(dict.contains_key("BS"));
+        }
+    }
+
+    #[test]
+    fn test_polygon_build_border_effect_no_intensity() {
+        let effect = BorderEffect {
+            style: BorderEffectStyle::None,
+            intensity: 0.0,
+        };
+        let polygon =
+            PolygonAnnotation::polygon(vec![(0.0, 0.0), (100.0, 100.0)]).with_border_effect(effect);
+        let dict = polygon.build(&[]);
+        match dict.get("BE") {
+            Some(Object::Dictionary(be)) => {
+                assert!(!be.contains_key("I")); // intensity is 0
+            },
+            _ => panic!("Expected BE dictionary"),
+        }
+    }
+
+    #[test]
+    fn test_polygon_build_vertices_array() {
+        let polygon = PolygonAnnotation::polygon(vec![(10.0, 20.0), (30.0, 40.0), (50.0, 60.0)]);
+        let dict = polygon.build(&[]);
+        match dict.get("Vertices") {
+            Some(Object::Array(arr)) => {
+                // 3 vertices x 2 coords = 6 values
+                assert_eq!(arr.len(), 6);
+                assert_eq!(arr[0], Object::Real(10.0));
+                assert_eq!(arr[1], Object::Real(20.0));
+                assert_eq!(arr[4], Object::Real(50.0));
+                assert_eq!(arr[5], Object::Real(60.0));
+            },
+            _ => panic!("Expected Vertices array"),
+        }
+    }
+
+    #[test]
+    fn test_line_annotation_build_l_entry() {
+        let line = LineAnnotation::new((10.0, 20.0), (30.0, 40.0));
+        let dict = line.build(&[]);
+        match dict.get("L") {
+            Some(Object::Array(arr)) => {
+                assert_eq!(arr.len(), 4);
+                assert_eq!(arr[0], Object::Real(10.0));
+                assert_eq!(arr[1], Object::Real(20.0));
+                assert_eq!(arr[2], Object::Real(30.0));
+                assert_eq!(arr[3], Object::Real(40.0));
+            },
+            _ => panic!("Expected L array"),
+        }
+    }
+
+    #[test]
+    fn test_shape_annotation_circle_rect_values() {
+        let rect = Rect::new(100.0, 200.0, 50.0, 50.0);
+        let shape = ShapeAnnotation::circle(rect);
+        let dict = shape.build(&[]);
+        match dict.get("Rect") {
+            Some(Object::Array(arr)) => {
+                assert_eq!(arr.len(), 4);
+                assert_eq!(arr[0], Object::Real(100.0));
+                assert_eq!(arr[1], Object::Real(200.0));
+                assert_eq!(arr[2], Object::Real(150.0)); // x + width
+                assert_eq!(arr[3], Object::Real(250.0)); // y + height
+            },
+            _ => panic!("Expected Rect array"),
+        }
+    }
+
+    #[test]
+    fn test_shape_annotation_no_color() {
+        let mut shape = ShapeAnnotation::square(Rect::new(0.0, 0.0, 100.0, 100.0));
+        shape.color = None;
+        let dict = shape.build(&[]);
+        assert!(!dict.contains_key("C"));
+    }
+
+    #[test]
+    fn test_line_annotation_no_color() {
+        let mut line = LineAnnotation::new((0.0, 0.0), (100.0, 100.0));
+        line.color = None;
+        let dict = line.build(&[]);
+        assert!(!dict.contains_key("C"));
+    }
+
+    #[test]
+    fn test_polygon_no_color() {
+        let mut polygon = PolygonAnnotation::polygon(vec![(0.0, 0.0), (100.0, 100.0)]);
+        polygon.color = None;
+        let dict = polygon.build(&[]);
+        assert!(!dict.contains_key("C"));
+    }
+
+    #[test]
+    fn test_shape_annotation_flags_zero() {
+        let mut shape = ShapeAnnotation::square(Rect::new(0.0, 0.0, 100.0, 100.0));
+        shape.flags = AnnotationFlags::new(0);
+        let dict = shape.build(&[]);
+        assert!(!dict.contains_key("F"));
     }
 }

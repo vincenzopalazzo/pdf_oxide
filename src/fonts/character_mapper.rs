@@ -3,7 +3,7 @@
 //! Implements ISO 32000-1:2008 Section 9.10.2 Character-to-Unicode Mapping Priorities:
 //! 1. ToUnicode CMap (highest priority)
 //! 2. Adobe Glyph List (fallback 1)
-//! 3. Predefined CMaps (fallback 2)
+//! 3. Predefined CMaps (fallback 2) -- CID-to-Unicode for CJK character collections
 //! 4. ActualText attribute (fallback 3)
 //! 5. Font encoding (lowest priority)
 //!
@@ -13,6 +13,27 @@
 use super::adobe_glyph_list::ADOBE_GLYPH_LIST;
 use super::cmap::CMap;
 use std::collections::HashMap;
+
+/// Configuration for predefined CMap lookup (Priority 3).
+///
+/// Per PDF Spec ISO 32000-1:2008 Section 9.7.5.2, predefined CMaps provide
+/// CID-to-Unicode mappings for standard Adobe CJK character collections.
+///
+/// This stores the character collection ordering (from CIDSystemInfo) so the
+/// mapper can look up CIDs in the appropriate predefined mapping table.
+///
+/// # Supported Character Collections
+///
+/// - `"GB1"` - Adobe-GB1 (Simplified Chinese)
+/// - `"Japan1"` - Adobe-Japan1 (Japanese)
+/// - `"CNS1"` - Adobe-CNS1 (Traditional Chinese)
+/// - `"Korea1"` - Adobe-Korea1 (Korean)
+/// - `"Identity"` - Identity mapping (CID == Unicode code point)
+#[derive(Clone, Debug)]
+pub struct PredefinedCMapConfig {
+    /// The character collection ordering from CIDSystemInfo (e.g., "GB1", "Japan1").
+    pub ordering: String,
+}
 
 /// Character-to-Unicode mapper with priority-based fallback chain.
 ///
@@ -41,6 +62,9 @@ pub struct CharacterMapper {
     /// Priority 1: ToUnicode CMap (explicit character code to Unicode mapping)
     tounicode_cmap: Option<CMap>,
 
+    /// Priority 3: Predefined CMap config for CID-to-Unicode lookup
+    predefined_cmap: Option<PredefinedCMapConfig>,
+
     /// Priority 5: Font encoding (character code to glyph name or character)
     font_encoding: Option<HashMap<u32, char>>,
 }
@@ -50,6 +74,7 @@ impl CharacterMapper {
     pub fn new() -> Self {
         Self {
             tounicode_cmap: None,
+            predefined_cmap: None,
             font_encoding: None,
         }
     }
@@ -63,6 +88,31 @@ impl CharacterMapper {
     /// * `cmap` - The ToUnicode CMap, or None to remove it
     pub fn set_tounicode_cmap(&mut self, cmap: Option<CMap>) {
         self.tounicode_cmap = cmap;
+    }
+
+    /// Set the predefined CMap configuration (Priority 3).
+    ///
+    /// Configures CID-to-Unicode lookup using predefined Adobe character collection
+    /// mappings. This is used for CJK fonts without ToUnicode CMaps.
+    ///
+    /// Per PDF Spec ISO 32000-1:2008 Section 9.7.5.2, predefined CMaps provide
+    /// standard CID-to-Unicode mappings for Adobe character collections.
+    ///
+    /// # Arguments
+    /// * `config` - The predefined CMap configuration, or None to remove it
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pdf_oxide::fonts::character_mapper::{CharacterMapper, PredefinedCMapConfig};
+    ///
+    /// let mut mapper = CharacterMapper::new();
+    /// mapper.set_predefined_cmap(Some(PredefinedCMapConfig {
+    ///     ordering: "Japan1".to_string(),
+    /// }));
+    /// ```
+    pub fn set_predefined_cmap(&mut self, config: Option<PredefinedCMapConfig>) {
+        self.predefined_cmap = config;
     }
 
     /// Set the font encoding (Priority 5 - lowest).
@@ -81,8 +131,8 @@ impl CharacterMapper {
     /// Implements the PDF spec's priority order:
     /// 1. ToUnicode CMap - if present and has mapping
     /// 2. Adobe Glyph List - fallback to standard glyph names
-    /// 3. Predefined CMaps - (not yet implemented)
-    /// 4. ActualText - (not yet implemented)
+    /// 3. Predefined CMaps - CID-to-Unicode for CJK character collections
+    /// 4. ActualText - (handled externally in BDC operator processing)
     /// 5. Font encoding - lowest priority
     ///
     /// # Arguments
@@ -109,9 +159,16 @@ impl CharacterMapper {
             }
         }
 
-        // Priority 3: Predefined CMaps (not yet implemented - would go here)
+        // Priority 3: Predefined CMaps (CID-to-Unicode for CJK character collections)
+        // Per PDF Spec Section 9.7.5.2, use the character collection ordering to
+        // look up the Unicode code point for this CID.
+        if let Some(ref config) = self.predefined_cmap {
+            if let Some(unicode_str) = self.lookup_predefined_cmap(config, code) {
+                return Some(unicode_str);
+            }
+        }
 
-        // Priority 4: ActualText (not yet implemented - would go here)
+        // Priority 4: ActualText (handled externally in BDC operator / structure tree)
 
         // Priority 5: Font encoding
         if let Some(ref encoding) = self.font_encoding {
@@ -122,6 +179,37 @@ impl CharacterMapper {
 
         // No mapping found - return U+FFFD replacement character per PDF Spec 9.10.2
         Some("\u{FFFD}".to_string())
+    }
+
+    /// Look up a CID in a predefined CMap using the character collection ordering.
+    ///
+    /// Routes to the appropriate CID-to-Unicode mapping table based on the
+    /// character collection ordering from CIDSystemInfo.
+    ///
+    /// For "Identity" ordering, the CID is treated as a direct Unicode code point
+    /// (Identity-H/Identity-V mapping).
+    fn lookup_predefined_cmap(&self, config: &PredefinedCMapConfig, code: u32) -> Option<String> {
+        // Truncate to u16 for CID lookup (CIDs are 16-bit values)
+        let cid = code as u16;
+
+        let unicode_codepoint = match config.ordering.as_str() {
+            "GB1" => super::cid_mappings::lookup_adobe_gb1(cid),
+            "Japan1" => super::cid_mappings::lookup_adobe_japan1(cid),
+            "CNS1" => super::cid_mappings::lookup_adobe_cns1(cid),
+            "Korea1" => super::cid_mappings::lookup_adobe_korea1(cid),
+            "Identity" => {
+                // Identity mapping: CID == Unicode code point
+                // Valid for BMP range (0x0000-0xFFFF)
+                if code <= 0xFFFF {
+                    Some(code)
+                } else {
+                    None
+                }
+            },
+            _ => None,
+        };
+
+        unicode_codepoint.and_then(|cp| char::from_u32(cp).map(|ch| ch.to_string()))
     }
 
     /// Map a glyph name to its Unicode representation.
@@ -406,5 +494,139 @@ mod internal_tests {
         // Test that Adobe Glyph List lookups work
         assert!(mapper.map_glyph_name("A").is_some());
         assert!(mapper.map_glyph_name("space").is_some());
+    }
+
+    // ===== Tests for Predefined CMap Support (Issue #104 Sub-category 3) =====
+
+    #[test]
+    fn test_predefined_cmap_japan1_ascii() {
+        let mut mapper = CharacterMapper::new();
+        mapper.set_predefined_cmap(Some(PredefinedCMapConfig {
+            ordering: "Japan1".to_string(),
+        }));
+        // CID 34 -> 'A' (U+0041) in Adobe-Japan1
+        // Note: This goes through Priority 2 (glyph list) first for ASCII range.
+        // For CIDs outside ASCII range, it falls through to Priority 3.
+        let result = mapper.map_character(34);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_predefined_cmap_japan1_hiragana() {
+        let mut mapper = CharacterMapper::new();
+        // Clear tounicode_cmap so Priority 3 is reached
+        mapper.set_tounicode_cmap(None);
+        mapper.set_predefined_cmap(Some(PredefinedCMapConfig {
+            ordering: "Japan1".to_string(),
+        }));
+        // CID 843 -> U+3042 (hiragana 'a') in Adobe-Japan1
+        let result = mapper.map_character(843);
+        assert_eq!(result, Some("\u{3042}".to_string())); // あ
+    }
+
+    #[test]
+    fn test_predefined_cmap_gb1_chinese() {
+        let mut mapper = CharacterMapper::new();
+        mapper.set_predefined_cmap(Some(PredefinedCMapConfig {
+            ordering: "GB1".to_string(),
+        }));
+        // CID 4559 -> U+4E2D (中) in Adobe-GB1
+        let result = mapper.map_character(4559);
+        assert_eq!(result, Some("\u{4E2D}".to_string())); // 中
+    }
+
+    #[test]
+    fn test_predefined_cmap_korea1_hangul() {
+        let mut mapper = CharacterMapper::new();
+        mapper.set_predefined_cmap(Some(PredefinedCMapConfig {
+            ordering: "Korea1".to_string(),
+        }));
+        // CID 1086 -> U+AC00 (가) in Adobe-Korea1
+        let result = mapper.map_character(1086);
+        assert_eq!(result, Some("\u{AC00}".to_string())); // 가
+    }
+
+    #[test]
+    fn test_predefined_cmap_cns1() {
+        let mut mapper = CharacterMapper::new();
+        mapper.set_predefined_cmap(Some(PredefinedCMapConfig {
+            ordering: "CNS1".to_string(),
+        }));
+        // CID 34 -> 'A' (U+0041) in Adobe-CNS1
+        let result = mapper.map_character(34);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_predefined_cmap_identity() {
+        let mut mapper = CharacterMapper::new();
+        mapper.set_predefined_cmap(Some(PredefinedCMapConfig {
+            ordering: "Identity".to_string(),
+        }));
+        // Identity: CID 0x4E2D == U+4E2D directly
+        let result = mapper.map_character(0x4E2D);
+        assert_eq!(result, Some("\u{4E2D}".to_string())); // 中
+    }
+
+    #[test]
+    fn test_predefined_cmap_unknown_ordering() {
+        let mut mapper = CharacterMapper::new();
+        mapper.set_predefined_cmap(Some(PredefinedCMapConfig {
+            ordering: "UnknownCollection".to_string(),
+        }));
+        // Unknown ordering should fall through to next priority
+        // Code 0x4E2D is outside ASCII/WinAnsi range, so no glyph name match
+        // With unknown ordering, predefined CMap returns None
+        // Falls through to U+FFFD
+        let result = mapper.map_character(0x4E2D);
+        assert_eq!(result, Some("\u{FFFD}".to_string()));
+    }
+
+    #[test]
+    fn test_predefined_cmap_not_set() {
+        let mapper = CharacterMapper::new();
+        // Without predefined CMap set, mapper should still work for ASCII
+        assert_eq!(mapper.map_character(0x41), Some("A".to_string()));
+    }
+
+    #[test]
+    fn test_tounicode_overrides_predefined_cmap() {
+        use super::super::cmap::parse_tounicode_cmap;
+
+        let mut mapper = CharacterMapper::new();
+        mapper.set_predefined_cmap(Some(PredefinedCMapConfig {
+            ordering: "Japan1".to_string(),
+        }));
+
+        // Create a simple ToUnicode CMap that maps CID 843 to 'X'
+        let cmap_data = b"/CIDInit /ProcSet findresource begin\n\
+            12 dict begin\n\
+            begincmap\n\
+            /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+            /CMapName /Adobe-Identity-UCS def\n\
+            1 beginbfchar\n\
+            <034B> <0058>\n\
+            endbfchar\n\
+            endcmap\n\
+            CMapName currentdict /CMap defineresource pop\n\
+            end\n\
+            end";
+
+        if let Ok(cmap) = parse_tounicode_cmap(cmap_data) {
+            mapper.set_tounicode_cmap(Some(cmap));
+        }
+
+        // ToUnicode (Priority 1) should override predefined CMap (Priority 3)
+        let result = mapper.map_character(843); // 0x034B
+        assert_eq!(result, Some("X".to_string()));
+    }
+
+    #[test]
+    fn test_predefined_cmap_config_clone() {
+        let config = PredefinedCMapConfig {
+            ordering: "Japan1".to_string(),
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.ordering, "Japan1");
     }
 }

@@ -275,3 +275,246 @@ impl IntoIterator for OrderedSpans {
         self.spans.into_iter()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::Rect;
+    use crate::layout::{Color, FontWeight};
+
+    fn make_span(text: &str, x: f32, y: f32, w: f32, h: f32) -> TextSpan {
+        TextSpan {
+            text: text.to_string(),
+            bbox: Rect::new(x, y, w, h),
+            font_name: "Helvetica".to_string(),
+            font_size: 12.0,
+            font_weight: FontWeight::Normal,
+            is_italic: false,
+            color: Color::new(0.0, 0.0, 0.0),
+            mcid: None,
+            sequence: 0,
+            split_boundary_before: false,
+            offset_semantic: false,
+            char_spacing: 0.0,
+            word_spacing: 0.0,
+            horizontal_scaling: 100.0,
+            primary_detected: false,
+        }
+    }
+
+    // ReadingOrderSource tests
+
+    #[test]
+    fn test_reading_order_source_default() {
+        let source = ReadingOrderSource::default();
+        assert_eq!(source, ReadingOrderSource::Simple);
+    }
+
+    #[test]
+    fn test_reading_order_source_confidences() {
+        assert_eq!(ReadingOrderSource::StructureTree.default_confidence(), 1.0);
+        assert_eq!(ReadingOrderSource::XYCut.default_confidence(), 0.90);
+        assert_eq!(ReadingOrderSource::Geometric.default_confidence(), 0.85);
+        assert_eq!(ReadingOrderSource::Simple.default_confidence(), 0.75);
+        assert_eq!(ReadingOrderSource::UserAssigned.default_confidence(), 1.0);
+        assert_eq!(ReadingOrderSource::Fallback.default_confidence(), 0.65);
+    }
+
+    #[test]
+    fn test_reading_order_source_names() {
+        assert_eq!(ReadingOrderSource::StructureTree.name(), "StructureTree");
+        assert_eq!(ReadingOrderSource::XYCut.name(), "XYCut");
+        assert_eq!(ReadingOrderSource::Geometric.name(), "Geometric");
+        assert_eq!(ReadingOrderSource::Simple.name(), "Simple");
+        assert_eq!(ReadingOrderSource::UserAssigned.name(), "UserAssigned");
+        assert_eq!(ReadingOrderSource::Fallback.name(), "Fallback");
+    }
+
+    #[test]
+    fn test_reading_order_source_debug() {
+        let debug = format!("{:?}", ReadingOrderSource::XYCut);
+        assert!(debug.contains("XYCut"));
+    }
+
+    #[test]
+    fn test_reading_order_source_clone_copy_eq() {
+        let source = ReadingOrderSource::Geometric;
+        let copied = source;
+        let cloned = source;
+        assert_eq!(source, copied);
+        assert_eq!(source, cloned);
+        assert_ne!(source, ReadingOrderSource::Fallback);
+    }
+
+    // ReadingOrderInfo tests
+
+    #[test]
+    fn test_reading_order_info_default() {
+        let info = ReadingOrderInfo::default();
+        assert_eq!(info.source, ReadingOrderSource::Simple);
+        assert_eq!(info.confidence, 0.0); // Default f32
+    }
+
+    #[test]
+    fn test_reading_order_info_from_source() {
+        let info = ReadingOrderInfo::from_source(ReadingOrderSource::StructureTree);
+        assert_eq!(info.source, ReadingOrderSource::StructureTree);
+        assert_eq!(info.confidence, 1.0);
+    }
+
+    #[test]
+    fn test_reading_order_info_with_confidence() {
+        let info = ReadingOrderInfo::with_confidence(ReadingOrderSource::XYCut, 0.95);
+        assert_eq!(info.source, ReadingOrderSource::XYCut);
+        assert_eq!(info.confidence, 0.95);
+    }
+
+    #[test]
+    fn test_reading_order_info_with_confidence_clamped() {
+        let info = ReadingOrderInfo::with_confidence(ReadingOrderSource::Simple, 1.5);
+        assert_eq!(info.confidence, 1.0);
+
+        let info2 = ReadingOrderInfo::with_confidence(ReadingOrderSource::Simple, -0.5);
+        assert_eq!(info2.confidence, 0.0);
+    }
+
+    #[test]
+    fn test_reading_order_info_convenience_constructors() {
+        assert_eq!(ReadingOrderInfo::structure_tree().source, ReadingOrderSource::StructureTree);
+        assert_eq!(ReadingOrderInfo::xycut().source, ReadingOrderSource::XYCut);
+        assert_eq!(ReadingOrderInfo::geometric().source, ReadingOrderSource::Geometric);
+        assert_eq!(ReadingOrderInfo::simple().source, ReadingOrderSource::Simple);
+        assert_eq!(ReadingOrderInfo::fallback().source, ReadingOrderSource::Fallback);
+    }
+
+    // OrderedTextSpan tests
+
+    #[test]
+    fn test_ordered_text_span_new() {
+        let span = make_span("Hello", 10.0, 20.0, 50.0, 12.0);
+        let ordered = OrderedTextSpan::new(span, 0);
+        assert_eq!(ordered.reading_order, 0);
+        assert!(ordered.group_id.is_none());
+        assert_eq!(ordered.source(), ReadingOrderSource::Simple);
+    }
+
+    #[test]
+    fn test_ordered_text_span_with_info() {
+        let span = make_span("World", 10.0, 20.0, 50.0, 12.0);
+        let info = ReadingOrderInfo::structure_tree();
+        let ordered = OrderedTextSpan::with_info(span, 5, info);
+        assert_eq!(ordered.reading_order, 5);
+        assert_eq!(ordered.source(), ReadingOrderSource::StructureTree);
+        assert_eq!(ordered.confidence(), 1.0);
+    }
+
+    #[test]
+    fn test_ordered_text_span_with_group() {
+        let span = make_span("Test", 10.0, 20.0, 50.0, 12.0);
+        let ordered = OrderedTextSpan::new(span, 0).with_group(3);
+        assert_eq!(ordered.group_id, Some(3));
+    }
+
+    #[test]
+    fn test_ordered_text_span_with_order_info() {
+        let span = make_span("Test", 10.0, 20.0, 50.0, 12.0);
+        let ordered = OrderedTextSpan::new(span, 0).with_order_info(ReadingOrderInfo::xycut());
+        assert_eq!(ordered.source(), ReadingOrderSource::XYCut);
+    }
+
+    // OrderedSpans tests
+
+    #[test]
+    fn test_ordered_spans_empty() {
+        let spans = OrderedSpans::new(vec![]);
+        assert!(spans.is_empty());
+        assert_eq!(spans.len(), 0);
+    }
+
+    #[test]
+    fn test_ordered_spans_basic() {
+        let s1 = OrderedTextSpan::new(make_span("A", 10.0, 20.0, 50.0, 12.0), 1);
+        let s2 = OrderedTextSpan::new(make_span("B", 70.0, 20.0, 50.0, 12.0), 0);
+        let spans = OrderedSpans::new(vec![s1, s2]);
+        assert_eq!(spans.len(), 2);
+        assert!(!spans.is_empty());
+    }
+
+    #[test]
+    fn test_ordered_spans_in_reading_order() {
+        let s1 = OrderedTextSpan::new(make_span("Second", 10.0, 20.0, 50.0, 12.0), 1);
+        let s2 = OrderedTextSpan::new(make_span("First", 70.0, 20.0, 50.0, 12.0), 0);
+        let spans = OrderedSpans::new(vec![s1, s2]);
+
+        let ordered = spans.in_reading_order();
+        assert_eq!(ordered[0].span.text, "First");
+        assert_eq!(ordered[1].span.text, "Second");
+    }
+
+    #[test]
+    fn test_ordered_spans_spans() {
+        let s1 = OrderedTextSpan::new(make_span("A", 10.0, 20.0, 50.0, 12.0), 0);
+        let spans = OrderedSpans::new(vec![s1]);
+        assert_eq!(spans.spans().len(), 1);
+    }
+
+    #[test]
+    fn test_ordered_spans_into_vec() {
+        let s1 = OrderedTextSpan::new(make_span("A", 10.0, 20.0, 50.0, 12.0), 0);
+        let spans = OrderedSpans::new(vec![s1]);
+        let vec = spans.into_vec();
+        assert_eq!(vec.len(), 1);
+    }
+
+    #[test]
+    fn test_ordered_spans_from_vec() {
+        let s1 = OrderedTextSpan::new(make_span("A", 10.0, 20.0, 50.0, 12.0), 0);
+        let spans: OrderedSpans = vec![s1].into();
+        assert_eq!(spans.len(), 1);
+    }
+
+    #[test]
+    fn test_ordered_spans_into_iter() {
+        let s1 = OrderedTextSpan::new(make_span("A", 10.0, 20.0, 50.0, 12.0), 0);
+        let s2 = OrderedTextSpan::new(make_span("B", 70.0, 20.0, 50.0, 12.0), 1);
+        let spans = OrderedSpans::new(vec![s1, s2]);
+
+        let collected: Vec<_> = spans.into_iter().collect();
+        assert_eq!(collected.len(), 2);
+    }
+
+    #[test]
+    fn test_ordered_spans_group_into_lines_empty() {
+        let spans = OrderedSpans::new(vec![]);
+        let lines = spans.group_into_lines(2.0);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn test_ordered_spans_group_into_lines_single() {
+        let s1 = OrderedTextSpan::new(make_span("A", 10.0, 100.0, 50.0, 12.0), 0);
+        let spans = OrderedSpans::new(vec![s1]);
+        let lines = spans.group_into_lines(2.0);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].len(), 1);
+    }
+
+    #[test]
+    fn test_ordered_spans_group_into_lines_same_line() {
+        let s1 = OrderedTextSpan::new(make_span("A", 10.0, 100.0, 50.0, 12.0), 0);
+        let s2 = OrderedTextSpan::new(make_span("B", 70.0, 101.0, 50.0, 12.0), 1); // close Y
+        let spans = OrderedSpans::new(vec![s1, s2]);
+        let lines = spans.group_into_lines(2.0);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].len(), 2);
+    }
+
+    #[test]
+    fn test_ordered_spans_group_into_lines_different_lines() {
+        let s1 = OrderedTextSpan::new(make_span("Line1", 10.0, 100.0, 50.0, 12.0), 0);
+        let s2 = OrderedTextSpan::new(make_span("Line2", 10.0, 80.0, 50.0, 12.0), 1);
+        let spans = OrderedSpans::new(vec![s1, s2]);
+        let lines = spans.group_into_lines(2.0);
+        assert_eq!(lines.len(), 2);
+    }
+}

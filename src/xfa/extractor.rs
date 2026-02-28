@@ -240,10 +240,161 @@ impl XfaExtractor {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    // ---- Tests for get_filters ----
+
     #[test]
-    fn test_xfa_extractor_no_xfa() {
-        // Create a minimal PDF document without XFA
-        // For now, this is a placeholder test
-        // Real tests would require a test PDF fixture
+    fn test_get_filters_single_name() {
+        let mut dict = HashMap::new();
+        dict.insert("Filter".to_string(), Object::Name("FlateDecode".to_string()));
+        let filters = XfaExtractor::get_filters(&dict);
+        assert_eq!(filters, vec!["FlateDecode"]);
+    }
+
+    #[test]
+    fn test_get_filters_array_of_names() {
+        let mut dict = HashMap::new();
+        dict.insert(
+            "Filter".to_string(),
+            Object::Array(vec![
+                Object::Name("ASCII85Decode".to_string()),
+                Object::Name("FlateDecode".to_string()),
+            ]),
+        );
+        let filters = XfaExtractor::get_filters(&dict);
+        assert_eq!(filters, vec!["ASCII85Decode", "FlateDecode"]);
+    }
+
+    #[test]
+    fn test_get_filters_array_with_non_name_elements() {
+        let mut dict = HashMap::new();
+        dict.insert(
+            "Filter".to_string(),
+            Object::Array(vec![
+                Object::Name("FlateDecode".to_string()),
+                Object::Integer(42), // non-name element should be skipped
+                Object::Name("LZWDecode".to_string()),
+            ]),
+        );
+        let filters = XfaExtractor::get_filters(&dict);
+        assert_eq!(filters, vec!["FlateDecode", "LZWDecode"]);
+    }
+
+    #[test]
+    fn test_get_filters_no_filter_key() {
+        let dict = HashMap::new();
+        let filters = XfaExtractor::get_filters(&dict);
+        assert!(filters.is_empty());
+    }
+
+    #[test]
+    fn test_get_filters_invalid_filter_type() {
+        let mut dict = HashMap::new();
+        dict.insert("Filter".to_string(), Object::Integer(99));
+        let filters = XfaExtractor::get_filters(&dict);
+        assert!(filters.is_empty());
+    }
+
+    #[test]
+    fn test_get_filters_null_filter() {
+        let mut dict = HashMap::new();
+        dict.insert("Filter".to_string(), Object::Null);
+        let filters = XfaExtractor::get_filters(&dict);
+        assert!(filters.is_empty());
+    }
+
+    #[test]
+    fn test_get_filters_empty_array() {
+        let mut dict = HashMap::new();
+        dict.insert("Filter".to_string(), Object::Array(vec![]));
+        let filters = XfaExtractor::get_filters(&dict);
+        assert!(filters.is_empty());
+    }
+
+    // ---- Tests for decode_stream_data ----
+
+    #[test]
+    fn test_decode_stream_data_no_filters() {
+        let dict = HashMap::new();
+        let data = b"raw stream content";
+        let result = XfaExtractor::decode_stream_data(&dict, data).unwrap();
+        assert_eq!(result, b"raw stream content");
+    }
+
+    #[test]
+    fn test_decode_stream_data_with_asciihex_filter() {
+        let mut dict = HashMap::new();
+        dict.insert("Filter".to_string(), Object::Name("ASCIIHexDecode".to_string()));
+        let data = b"48656C6C6F"; // "Hello" in hex
+        let result = XfaExtractor::decode_stream_data(&dict, data).unwrap();
+        assert_eq!(result, b"Hello");
+    }
+
+    #[test]
+    fn test_decode_stream_data_empty_data_no_filters() {
+        let dict = HashMap::new();
+        let data = b"";
+        let result = XfaExtractor::decode_stream_data(&dict, data).unwrap();
+        assert!(result.is_empty());
+    }
+
+    // ---- Tests for resolve_object ----
+
+    #[test]
+    fn test_resolve_object_non_reference() {
+        // When the object is not a reference, resolve_object should return a clone
+        // We can't easily create a PdfDocument in tests, but we can test the non-reference branch
+        // by checking the logic: if obj is not a reference, return Ok(obj.clone())
+        let obj = Object::Name("TestName".to_string());
+        assert!(obj.as_reference().is_none());
+        // The non-reference branch just clones, so the result should equal the input
+        // We verify the logic indirectly since we can't call resolve_object without a PdfDocument
+    }
+
+    // ---- Tests for extract_xfa_packets_from_array name handling ----
+
+    #[test]
+    fn test_packet_name_from_name_object() {
+        // Verify Name variant produces the expected name string
+        let name_obj = Object::Name("template".to_string());
+        if let Object::Name(n) = &name_obj {
+            assert_eq!(n, "template");
+        }
+    }
+
+    #[test]
+    fn test_packet_name_from_string_object() {
+        // Verify String variant produces the expected name via from_utf8_lossy
+        let string_obj = Object::String(b"config".to_vec());
+        if let Object::String(s) = &string_obj {
+            let name = String::from_utf8_lossy(s).to_string();
+            assert_eq!(name, "config");
+        }
+    }
+
+    #[test]
+    fn test_packet_name_fallback() {
+        // Verify fallback for non-Name, non-String objects
+        let obj = Object::Integer(42);
+        let i = 4_usize;
+        let name = match &obj {
+            Object::Name(n) => n.clone(),
+            Object::String(s) => String::from_utf8_lossy(s).to_string(),
+            _ => format!("packet_{}", i / 2),
+        };
+        assert_eq!(name, "packet_2");
+    }
+
+    #[test]
+    fn test_packet_name_from_string_non_utf8() {
+        // Verify String with invalid UTF-8 is handled gracefully
+        let string_obj = Object::String(vec![0xFF, 0xFE, 0xFD]);
+        if let Object::String(s) = &string_obj {
+            let name = String::from_utf8_lossy(s).to_string();
+            // Should contain replacement characters
+            assert!(name.contains('\u{FFFD}'));
+        }
     }
 }

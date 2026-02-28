@@ -223,6 +223,207 @@ options = ConversionOptions(embed_images=True)
 html = doc.to_html(0, options)
 ```
 
+## OCR - Extracting Text from Scanned PDFs
+
+> For a comprehensive guide covering model selection, configuration reference, resize strategies, and troubleshooting, see the [OCR Guide](OCR_GUIDE.md).
+
+PDFOxide can extract text from scanned PDFs using PaddleOCR models via ONNX Runtime. This requires building with the `ocr` feature.
+
+### Setup
+
+```bash
+# Install with OCR support
+pip install pdf_oxide[ocr]
+
+# Or build from source with OCR
+maturin develop --features python,ocr
+```
+
+**Quick start** — download the recommended models:
+
+```bash
+./scripts/setup_ocr_models.sh
+```
+
+#### Model Selection Guide
+
+PDFOxide supports PaddleOCR v3, v4, and v5 models. You can mix detection and recognition models from different versions.
+
+| Combination | Detection | Recognition | English Accuracy | Total Size |
+|---|---|---|---|---|
+| **V4 det + V5 rec (recommended)** | ch_PP-OCRv4_det | en_PP-OCRv5_mobile_rec | Best | ~12.5 MB |
+| V4 det + V4 rec | ch_PP-OCRv4_det | en_PP-OCRv4_rec | Good | ~12.4 MB |
+| V5 det + V5 rec | PP-OCRv5_server_det | en_PP-OCRv5_mobile_rec | Good (different errors) | ~96 MB |
+| V3 det + V3 rec | en_PP-OCRv3_det | en_PP-OCRv3_rec | Fair | ~11 MB |
+
+The **V4 detection + V5 recognition** combination gives the best results for English documents: V4 detection reliably segments text lines, while V5 recognition has the highest character-level accuracy.
+
+**Manual download:**
+
+```bash
+# Recommended: V4 detection + V5 recognition
+# Detection (4.7 MB):
+curl -L https://huggingface.co/deepghs/paddleocr/resolve/main/det/ch_PP-OCRv4_det/model.onnx -o .models/det.onnx
+
+# Recognition (7.8 MB):
+curl -L https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/english/rec.onnx -o .models/rec.onnx
+
+# Dictionary (must include space as last entry):
+curl -L https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/english/dict.txt -o .models/en_dict.txt
+echo " " >> .models/en_dict.txt
+```
+
+### Basic OCR Usage
+
+```python
+from pdf_oxide import PdfDocument, OcrEngine, OcrConfig
+
+# Create OCR engine (default config works with recommended V4 det + V5 rec models)
+engine = OcrEngine(
+    det_model_path=".models/det.onnx",
+    rec_model_path=".models/rec.onnx",
+    dict_path=".models/en_dict.txt",
+)
+
+# Extract text using OCR
+doc = PdfDocument("scanned.pdf")
+text = doc.extract_text_ocr(page=0, engine=engine)
+print(text)
+```
+
+### Processing Multiple Pages
+
+```python
+doc = PdfDocument("scanned.pdf")
+for page in range(doc.page_count()):
+    text = doc.extract_text_ocr(page=page, engine=engine)
+    if text.strip():
+        print(f"--- Page {page + 1} ---")
+        print(text)
+```
+
+### Using PP-OCRv5 Detection
+
+If you use the full PP-OCRv5 stack (v5 detection + v5 recognition), pass `use_v5=True` to `OcrConfig`. This preserves the original image resolution instead of downscaling to 960px, which the larger v5 detection model needs:
+
+```python
+config = OcrConfig(use_v5=True)
+engine = OcrEngine(
+    det_model_path="v5_det.onnx",
+    rec_model_path="v5_rec.onnx",
+    dict_path="v5_dict.txt",
+    config=config,
+)
+```
+
+> **Note:** The `OcrEngine` is reusable — create it once and pass it to multiple `extract_text_ocr` calls. ONNX Runtime requires `libonnxruntime.so` (v1.23+) to be available at runtime (via `LD_LIBRARY_PATH` or system install).
+
+## Structured Extraction
+
+Beyond plain text, PDFOxide can extract structured content from pages:
+
+```python
+from pdf_oxide import PdfDocument
+
+doc = PdfDocument("document.pdf")
+
+# Text spans with font info, position, and style
+spans = doc.extract_spans(0)
+for span in spans:
+    print(f"{span.text} — {span.font_name} {span.font_size}pt, bold={span.is_bold}")
+
+# Image metadata
+images = doc.extract_images(0)
+for img in images:
+    print(f"{img['width']}x{img['height']} {img['color_space']}")
+
+# Bookmarks / table of contents
+outline = doc.get_outline()  # None if no outline
+if outline:
+    for item in outline:
+        print(f"{item['title']} -> page {item.get('page')}")
+
+# Annotations (links, highlights, form fields, etc.)
+annotations = doc.get_annotations(0)
+for ann in annotations:
+    print(f"{ann['subtype']} at {ann['rect']}")
+
+# Vector paths (lines, curves, shapes)
+paths = doc.extract_paths(0)
+for path in paths:
+    print(f"bbox={path['bbox']}, stroke={path.get('stroke_color')}")
+```
+
+## Working with Form Fields
+
+PDFOxide can extract, read, fill, and export PDF form field data (AcroForm fields).
+
+### List All Form Fields
+
+```python
+from pdf_oxide import PdfDocument
+
+doc = PdfDocument("tax-form.pdf")
+fields = doc.get_form_fields()
+
+for f in fields:
+    print(f"{f.name} ({f.field_type}) = {f.value}")
+```
+
+Each `FormField` has:
+- `name` — fully qualified field name (e.g. `"topmostSubform[0].Page1[0].f1_01[0]"`)
+- `field_type` — `"text"`, `"button"`, `"choice"`, `"signature"`
+- `value` — current value (`str`, `bool`, or `None`)
+- `flags` — field flags (read-only, required, etc.)
+
+### Read and Set Field Values
+
+```python
+doc = PdfDocument("w2.pdf")
+
+# Read a field value
+ssn = doc.get_form_field_value("topmostSubform[0].CopyA[0].f1_01[0]")
+print(f"SSN: {ssn}")
+
+# Fill fields
+doc.set_form_field_value("employee_name", "Jane Doe")
+doc.set_form_field_value("wages", "85000.00")
+doc.set_form_field_value("retirement_plan", True)  # checkbox
+
+# Save (values are persisted via incremental save)
+doc.save("filled_w2.pdf")
+```
+
+### Extract Text with Form Field Values
+
+Filled form field values appear inline in `extract_text` and `to_markdown`:
+
+```python
+doc = PdfDocument("filled_w2.pdf")
+
+# Form values appear inline in extracted text
+text = doc.extract_text(0)
+print(text)  # "Jane Doe" appears where the name field is
+
+# to_markdown includes form fields by default
+md = doc.to_markdown(0, include_form_fields=True)
+
+# Exclude form field values
+md_clean = doc.to_markdown(0, include_form_fields=False)
+```
+
+### Export Form Data
+
+```python
+doc = PdfDocument("filled-form.pdf")
+
+# Export as FDF
+doc.export_form_data("form_data.fdf")
+
+# Export as XFDF
+doc.export_form_data("form_data.xfdf", format="xfdf")
+```
+
 ## Performance Tips
 
 1. **Reuse document objects** - Opening a PDF has overhead, reuse the object for multiple operations

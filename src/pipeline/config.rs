@@ -96,6 +96,7 @@ impl DocumentType {
                 extract_tables: true,  // Detect tables
                 image_output_dir: None,
                 embed_images: true,
+                include_form_fields: true,
             },
             word_boundary_mode: WordBoundaryMode::Primary,
             enable_hyphenation_reconstruction: true, // Aggressive hyphenation
@@ -122,6 +123,7 @@ impl DocumentType {
                 extract_tables: true,  // Essential for reports
                 image_output_dir: None,
                 embed_images: true,
+                include_form_fields: true,
             },
             word_boundary_mode: WordBoundaryMode::Primary,
             enable_hyphenation_reconstruction: true,
@@ -148,6 +150,7 @@ impl DocumentType {
                 extract_tables: false,
                 image_output_dir: None,
                 embed_images: true,
+                include_form_fields: true,
             },
             word_boundary_mode: WordBoundaryMode::Tiebreaker,
             enable_hyphenation_reconstruction: true, // Essential for novels
@@ -174,6 +177,7 @@ impl DocumentType {
                 extract_tables: true,
                 image_output_dir: None,
                 embed_images: true,
+                include_form_fields: true,
             },
             word_boundary_mode: WordBoundaryMode::Primary,
             enable_hyphenation_reconstruction: false, // Not applicable to CJK
@@ -200,6 +204,7 @@ impl DocumentType {
                 extract_tables: true,
                 image_output_dir: None,
                 embed_images: true,
+                include_form_fields: true,
             },
             word_boundary_mode: WordBoundaryMode::Tiebreaker,
             enable_hyphenation_reconstruction: false, // Different rules
@@ -522,6 +527,7 @@ impl TextPipelineConfig {
                 extract_tables: opts.extract_tables,
                 image_output_dir: opts.image_output_dir.clone(),
                 embed_images: opts.embed_images,
+                include_form_fields: opts.include_form_fields,
             },
             word_boundary_mode: WordBoundaryMode::Tiebreaker, // Keep old behavior compatible
             enable_hyphenation_reconstruction: true,
@@ -1079,6 +1085,14 @@ pub struct OutputConfig {
     ///
     /// Default: true
     pub embed_images: bool,
+
+    /// Include form field values inline in output.
+    ///
+    /// When true (default), form field values are merged with page content at their
+    /// spatial positions. When false, form field values are omitted.
+    ///
+    /// Default: true
+    pub include_form_fields: bool,
 }
 
 impl Default for OutputConfig {
@@ -1091,6 +1105,7 @@ impl Default for OutputConfig {
             extract_tables: false,
             image_output_dir: None,
             embed_images: true,
+            include_form_fields: true,
         }
     }
 }

@@ -21,6 +21,8 @@ pub mod encoding;
 pub mod encoding_normalizer;
 pub mod font_dict; // Private module - only used internally by font_dict
 pub mod font_subsetter;
+/// Process-level cross-document font cache for batch processing.
+pub mod global_cache;
 pub mod non_text_detection;
 /// TrueType font CMap parsing for glyph-to-character mapping.
 pub mod truetype_cmap;
@@ -29,7 +31,7 @@ pub mod truetype_parser;
 /// Type 1 font encoding parser for extracting built-in encoding from FontFile data.
 pub mod type1_encoding;
 
-pub use character_mapper::CharacterMapper;
+pub use character_mapper::{CharacterMapper, PredefinedCMapConfig};
 pub use cmap::{parse_tounicode_cmap, CMap, LazyCMap};
 pub use encoding::UnicodeEncoder;
 pub use encoding_normalizer::EncodingNormalizer;

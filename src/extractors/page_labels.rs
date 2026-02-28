@@ -498,4 +498,206 @@ mod tests {
         assert_eq!(PageLabelStyle::from_name("a"), PageLabelStyle::AlphaLower);
         assert_eq!(PageLabelStyle::from_name("X"), PageLabelStyle::None);
     }
+
+    #[test]
+    fn test_page_label_style_to_name() {
+        assert_eq!(PageLabelStyle::Decimal.to_name(), Some("D"));
+        assert_eq!(PageLabelStyle::RomanUpper.to_name(), Some("R"));
+        assert_eq!(PageLabelStyle::RomanLower.to_name(), Some("r"));
+        assert_eq!(PageLabelStyle::AlphaUpper.to_name(), Some("A"));
+        assert_eq!(PageLabelStyle::AlphaLower.to_name(), Some("a"));
+        assert_eq!(PageLabelStyle::None.to_name(), None);
+    }
+
+    #[test]
+    fn test_page_label_style_roundtrip() {
+        for style in [
+            PageLabelStyle::Decimal,
+            PageLabelStyle::RomanUpper,
+            PageLabelStyle::RomanLower,
+            PageLabelStyle::AlphaUpper,
+            PageLabelStyle::AlphaLower,
+        ] {
+            let name = style.to_name().unwrap();
+            assert_eq!(PageLabelStyle::from_name(name), style);
+        }
+    }
+
+    #[test]
+    fn test_page_label_range_default() {
+        let range = PageLabelRange::default();
+        assert_eq!(range.start_page, 0);
+        assert_eq!(range.style, PageLabelStyle::Decimal);
+        assert!(range.prefix.is_none());
+        assert_eq!(range.start_value, 1);
+    }
+
+    #[test]
+    fn test_page_label_range_new() {
+        let range = PageLabelRange::new(5);
+        assert_eq!(range.start_page, 5);
+        assert_eq!(range.style, PageLabelStyle::Decimal);
+        assert_eq!(range.start_value, 1);
+    }
+
+    #[test]
+    fn test_page_label_range_builder() {
+        let range = PageLabelRange::new(10)
+            .with_style(PageLabelStyle::AlphaUpper)
+            .with_prefix("App-")
+            .with_start_value(3);
+        assert_eq!(range.start_page, 10);
+        assert_eq!(range.style, PageLabelStyle::AlphaUpper);
+        assert_eq!(range.prefix.as_deref(), Some("App-"));
+        assert_eq!(range.start_value, 3);
+    }
+
+    #[test]
+    fn test_format_label_decimal() {
+        let range = PageLabelRange::new(0).with_style(PageLabelStyle::Decimal);
+        assert_eq!(range.format_label(0), "1");
+        assert_eq!(range.format_label(9), "10");
+    }
+
+    #[test]
+    fn test_format_label_roman_upper() {
+        let range = PageLabelRange::new(0).with_style(PageLabelStyle::RomanUpper);
+        assert_eq!(range.format_label(0), "I");
+        assert_eq!(range.format_label(3), "IV");
+        assert_eq!(range.format_label(8), "IX");
+    }
+
+    #[test]
+    fn test_format_label_alpha_lower() {
+        let range = PageLabelRange::new(0).with_style(PageLabelStyle::AlphaLower);
+        assert_eq!(range.format_label(0), "a");
+        assert_eq!(range.format_label(1), "b");
+        assert_eq!(range.format_label(25), "z");
+        assert_eq!(range.format_label(26), "aa");
+    }
+
+    #[test]
+    fn test_format_label_alpha_upper() {
+        let range = PageLabelRange::new(0).with_style(PageLabelStyle::AlphaUpper);
+        assert_eq!(range.format_label(0), "A");
+        assert_eq!(range.format_label(25), "Z");
+        assert_eq!(range.format_label(26), "AA");
+    }
+
+    #[test]
+    fn test_format_label_none_style() {
+        let range = PageLabelRange::new(0).with_style(PageLabelStyle::None);
+        assert_eq!(range.format_label(0), "");
+        assert_eq!(range.format_label(5), "");
+    }
+
+    #[test]
+    fn test_format_label_none_style_with_prefix() {
+        let range = PageLabelRange::new(0)
+            .with_style(PageLabelStyle::None)
+            .with_prefix("Cover");
+        assert_eq!(range.format_label(0), "Cover");
+    }
+
+    #[test]
+    fn test_format_label_with_nonzero_start_page() {
+        let range = PageLabelRange::new(5)
+            .with_style(PageLabelStyle::Decimal)
+            .with_start_value(10);
+        assert_eq!(range.format_label(5), "10");
+        assert_eq!(range.format_label(6), "11");
+        assert_eq!(range.format_label(10), "15");
+    }
+
+    #[test]
+    fn test_get_label_no_ranges() {
+        assert_eq!(PageLabelExtractor::get_label(&[], 0), "1");
+        assert_eq!(PageLabelExtractor::get_label(&[], 4), "5");
+    }
+
+    #[test]
+    fn test_get_all_labels() {
+        let ranges = vec![
+            PageLabelRange::new(0).with_style(PageLabelStyle::RomanLower),
+            PageLabelRange::new(3).with_style(PageLabelStyle::Decimal),
+        ];
+        let labels = PageLabelExtractor::get_all_labels(&ranges, 6);
+        assert_eq!(labels, vec!["i", "ii", "iii", "1", "2", "3"]);
+    }
+
+    #[test]
+    fn test_get_all_labels_empty() {
+        let labels = PageLabelExtractor::get_all_labels(&[], 3);
+        assert_eq!(labels, vec!["1", "2", "3"]);
+    }
+
+    #[test]
+    fn test_to_roman_zero() {
+        assert_eq!(to_roman(0, false), "");
+        assert_eq!(to_roman(0, true), "");
+    }
+
+    #[test]
+    fn test_to_roman_large_numbers() {
+        assert_eq!(to_roman(3999, false), "mmmcmxcix");
+        assert_eq!(to_roman(3999, true), "MMMCMXCIX");
+    }
+
+    #[test]
+    fn test_to_roman_all_subtractive() {
+        assert_eq!(to_roman(4, false), "iv");
+        assert_eq!(to_roman(9, false), "ix");
+        assert_eq!(to_roman(40, false), "xl");
+        assert_eq!(to_roman(90, false), "xc");
+        assert_eq!(to_roman(400, false), "cd");
+        assert_eq!(to_roman(900, false), "cm");
+    }
+
+    #[test]
+    fn test_to_alpha_zero() {
+        assert_eq!(to_alpha(0, true), "");
+        assert_eq!(to_alpha(0, false), "");
+    }
+
+    #[test]
+    fn test_to_alpha_multi_digit() {
+        assert_eq!(to_alpha(702, true), "ZZ");
+        assert_eq!(to_alpha(703, true), "AAA");
+    }
+
+    #[test]
+    fn test_page_label_style_eq_and_copy() {
+        let s1 = PageLabelStyle::Decimal;
+        let s2 = s1; // Copy
+        assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn test_page_label_range_clone_eq() {
+        let r1 = PageLabelRange::new(0).with_prefix("X-");
+        let r2 = r1.clone();
+        assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn test_page_label_style_debug() {
+        let debug = format!("{:?}", PageLabelStyle::RomanUpper);
+        assert!(debug.contains("RomanUpper"));
+    }
+
+    #[test]
+    fn test_decode_text_string_utf16be() {
+        // UTF-16BE BOM (FE FF) followed by "A" (0x0041)
+        let bytes = vec![0xFE, 0xFF, 0x00, 0x41];
+        let result = PageLabelExtractor::decode_text_string(&bytes);
+        assert_eq!(result, Some("A".to_string()));
+    }
+
+    #[test]
+    fn test_decode_text_string_pdfdoc() {
+        // Simple ASCII in PDFDocEncoding
+        let bytes = b"Hello";
+        let result = PageLabelExtractor::decode_text_string(bytes);
+        assert_eq!(result, Some("Hello".to_string()));
+    }
 }

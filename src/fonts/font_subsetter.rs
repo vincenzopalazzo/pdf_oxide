@@ -98,7 +98,10 @@ impl FontSubsetter {
             let tag = Self::hash_to_tag(hash);
             self.subset_tag = Some(tag);
         }
-        self.subset_tag.as_ref().unwrap()
+        // Safety: subset_tag is set to Some on the line above
+        self.subset_tag
+            .as_ref()
+            .expect("subset_tag set on prior line")
     }
 
     /// Get the subset tag if already generated.

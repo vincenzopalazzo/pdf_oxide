@@ -3,25 +3,36 @@
 OCR text extraction example using pdf_oxide.
 
 This script demonstrates how to extract text from scanned PDFs using
-PaddleOCR PP-OCRv5 models via ONNX Runtime.
+PaddleOCR models via ONNX Runtime.
 
 Prerequisites:
     1. Build pdf_oxide with OCR feature:
        maturin develop --features python,ocr
 
-    2. Download PaddleOCR models:
-       - en_PP-OCRv5_det_infer.onnx  (detection model)
-       - en_PP-OCRv5_rec_infer.onnx  (recognition model)
-       - en_dict.txt                  (character dictionary)
+    2. Download PaddleOCR ONNX models:
+       ./scripts/setup_ocr_models.sh
+       Or manually download the recommended V4 det + V5 rec combination:
+       - det.onnx   (ch_PP-OCRv4_det from https://huggingface.co/deepghs/paddleocr)
+       - rec.onnx   (en_PP-OCRv5_mobile_rec from https://huggingface.co/monkt/paddleocr-onnx)
+       - en_dict.txt (character dictionary, must have space as last line)
+
+    3. ONNX Runtime (libonnxruntime.so v1.23+) must be on LD_LIBRARY_PATH.
 
 Usage:
     python ocr_example.py <pdf_file> --det <det_model> --rec <rec_model> --dict <dict_file>
 
-Example:
+Example (recommended V4 det + V5 rec):
     python ocr_example.py scanned.pdf \\
-        --det models/en_PP-OCRv5_det_infer.onnx \\
-        --rec models/en_PP-OCRv5_rec_infer.onnx \\
-        --dict models/en_dict.txt
+        --det .models/det.onnx \\
+        --rec .models/rec.onnx \\
+        --dict .models/en_dict.txt
+
+Example (full V5 stack):
+    python ocr_example.py scanned.pdf \\
+        --det .models/v5/det.onnx \\
+        --rec .models/v5/rec.onnx \\
+        --dict .models/v5/en_dict.txt \\
+        --v5
 """
 
 import argparse
@@ -35,26 +46,29 @@ def main():
     parser.add_argument("--det", required=True, help="Path to detection model (ONNX)")
     parser.add_argument("--rec", required=True, help="Path to recognition model (ONNX)")
     parser.add_argument("--dict", required=True, help="Path to character dictionary")
-    parser.add_argument("--dpi", type=float, default=300.0, help="DPI for rendering (default: 300)")
     parser.add_argument("--page", type=int, help="Process only this page (0-indexed)")
+    parser.add_argument(
+        "--v5",
+        action="store_true",
+        help="Use PP-OCRv5 config (high-res detection input, for V5 detection models)",
+    )
     args = parser.parse_args()
 
     # Import pdf_oxide
     try:
-        from pdf_oxide import PdfDocument, has_ocr
+        from pdf_oxide import PdfDocument
     except ImportError as e:
         print(f"Error: Failed to import pdf_oxide: {e}")
         print("Make sure to build with: maturin develop --features python,ocr")
         sys.exit(1)
 
-    # Check if OCR feature is available
-    if not has_ocr():
+    # Import OCR classes (only available when built with 'ocr' feature)
+    try:
+        from pdf_oxide import OcrConfig, OcrEngine
+    except ImportError:
         print("Error: pdf_oxide was not built with OCR support")
         print("Rebuild with: maturin develop --features python,ocr")
         sys.exit(1)
-
-    # Import OCR classes (only available when OCR feature is enabled)
-    from pdf_oxide import OcrConfig, OcrEngine
 
     # Validate paths
     if not Path(args.pdf).exists():
@@ -75,15 +89,21 @@ def main():
     print()
 
     # Create OCR configuration
-    print("Configuring OCR engine...")
-    config = OcrConfig(det_threshold=0.3, box_threshold=0.5, rec_threshold=0.5, num_threads=4)
+    # use_v5=True preserves high-resolution input for V5 detection models.
+    # For the default V4 det + V5 rec combination, use_v5 should be False.
+    if args.v5:
+        print("Using PP-OCRv5 config (high-resolution detection input)")
+    config = OcrConfig(use_v5=args.v5)
     print(f"Config: {config}")
 
     # Load OCR engine
     print("\nLoading OCR models...")
     try:
         engine = OcrEngine(
-            det_model_path=args.det, rec_model_path=args.rec, dict_path=args.dict, config=config
+            det_model_path=args.det,
+            rec_model_path=args.rec,
+            dict_path=args.dict,
+            config=config,
         )
         print("OCR engine loaded successfully!")
     except Exception as e:
@@ -116,65 +136,20 @@ def main():
         print(f"Page {page_idx + 1} of {page_count}")
         print("-" * 70)
 
-        # Check if page needs OCR
         try:
-            needs_ocr = doc.needs_ocr(page_idx)
-        except Exception as e:
-            print(f"Warning: Could not check if OCR needed: {e}")
-            needs_ocr = True  # Assume it needs OCR
-
-        if needs_ocr:
-            print("Page appears to be scanned, running OCR...")
-            try:
-                # Use OCR extraction
-                text = doc.extract_text_with_ocr(page=page_idx, engine=engine, dpi=args.dpi)
-                if text.strip():
-                    print("\nExtracted text:")
-                    print(text)
-                else:
-                    print("(No text detected)")
-            except Exception as e:
-                print(f"OCR failed: {e}")
-        else:
-            print("Page has native text, using standard extraction...")
-            try:
-                text = doc.extract_text(page_idx)
+            text = doc.extract_text_ocr(page=page_idx, engine=engine)
+            if text.strip():
                 print("\nExtracted text:")
-                print(text if text.strip() else "(No text found)")
-            except Exception as e:
-                print(f"Text extraction failed: {e}")
+                print(text)
+            else:
+                print("(No text detected)")
+        except Exception as e:
+            print(f"OCR failed: {e}")
 
     print()
     print("=" * 70)
     print("Done!")
     print("=" * 70)
-
-
-def demo_ocr_image(engine, image_path: str):
-    """
-    Demonstrate OCR on a standalone image file.
-
-    Args:
-        engine: OcrEngine instance
-        image_path: Path to image file
-    """
-    print(f"\nRunning OCR on image: {image_path}")
-
-    try:
-        result = engine.ocr_image(image_path)
-
-        print(f"Confidence: {result['confidence']:.2%}")
-        print(f"Detected {len(result['spans'])} text regions")
-        print(f"\nFull text:\n{result['text']}")
-
-        # Show individual spans
-        if result["spans"]:
-            print("\nIndividual spans:")
-            for i, span in enumerate(result["spans"]):
-                print(f"  {i + 1}. [{span['confidence']:.2%}] {span['text']}")
-
-    except Exception as e:
-        print(f"OCR failed: {e}")
 
 
 if __name__ == "__main__":

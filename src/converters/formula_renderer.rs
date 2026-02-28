@@ -112,8 +112,9 @@ impl FormulaRenderer {
             return None;
         }
 
-        let min_mcid = *mcids.iter().min().unwrap();
-        let max_mcid = *mcids.iter().max().unwrap();
+        // Safety: mcids.is_empty() is checked above and returns None
+        let min_mcid = *mcids.iter().min().expect("mcids verified non-empty above");
+        let max_mcid = *mcids.iter().max().expect("mcids verified non-empty above");
 
         // Find text above (highest MCID < min_mcid)
         let text_above_y = mcid_y_map

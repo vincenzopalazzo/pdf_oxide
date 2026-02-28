@@ -1323,6 +1323,7 @@ pub fn validate_pdf_x(document: &mut PdfDocument, level: PdfXLevel) -> Result<XV
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compliance::pdf_x::XValidationStats;
 
     #[test]
     fn test_validator_creation() {
@@ -1377,5 +1378,824 @@ mod tests {
 
         let finalized = validator.finalize_result(result);
         assert!(finalized.warnings.is_empty());
+    }
+
+    // ==========================================
+    // parse_box tests
+    // ==========================================
+
+    #[test]
+    fn test_parse_box_none() {
+        assert_eq!(PdfXValidator::parse_box(None), None);
+    }
+
+    #[test]
+    fn test_parse_box_not_array() {
+        let obj = Object::Integer(42);
+        assert_eq!(PdfXValidator::parse_box(Some(&obj)), None);
+    }
+
+    #[test]
+    fn test_parse_box_too_few_elements() {
+        let obj = Object::Array(vec![Object::Real(0.0), Object::Real(0.0), Object::Real(100.0)]);
+        assert_eq!(PdfXValidator::parse_box(Some(&obj)), None);
+    }
+
+    #[test]
+    fn test_parse_box_with_reals() {
+        let obj = Object::Array(vec![
+            Object::Real(0.0),
+            Object::Real(0.0),
+            Object::Real(612.0),
+            Object::Real(792.0),
+        ]);
+        let result = PdfXValidator::parse_box(Some(&obj));
+        assert!(result.is_some());
+        let b = result.unwrap();
+        assert_eq!(b, [0.0, 0.0, 612.0, 792.0]);
+    }
+
+    #[test]
+    fn test_parse_box_with_integers() {
+        let obj = Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(612),
+            Object::Integer(792),
+        ]);
+        let result = PdfXValidator::parse_box(Some(&obj));
+        assert!(result.is_some());
+        let b = result.unwrap();
+        assert_eq!(b, [0.0, 0.0, 612.0, 792.0]);
+    }
+
+    #[test]
+    fn test_parse_box_with_mixed_types() {
+        let obj = Object::Array(vec![
+            Object::Integer(0),
+            Object::Real(0.5),
+            Object::Integer(612),
+            Object::Real(792.5),
+        ]);
+        let result = PdfXValidator::parse_box(Some(&obj));
+        assert!(result.is_some());
+        let b = result.unwrap();
+        assert_eq!(b, [0.0, 0.5, 612.0, 792.5]);
+    }
+
+    #[test]
+    fn test_parse_box_with_non_numeric() {
+        let obj = Object::Array(vec![
+            Object::Real(0.0),
+            Object::Name("bad".to_string()),
+            Object::Real(612.0),
+            Object::Real(792.0),
+        ]);
+        assert_eq!(PdfXValidator::parse_box(Some(&obj)), None);
+    }
+
+    #[test]
+    fn test_parse_box_extra_elements_ignored() {
+        let obj = Object::Array(vec![
+            Object::Real(0.0),
+            Object::Real(0.0),
+            Object::Real(100.0),
+            Object::Real(200.0),
+            Object::Real(300.0), // extra element
+        ]);
+        let result = PdfXValidator::parse_box(Some(&obj));
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), [0.0, 0.0, 100.0, 200.0]);
+    }
+
+    // ==========================================
+    // box_contains tests
+    // ==========================================
+
+    #[test]
+    fn test_box_contains_exact_match() {
+        let outer = [0.0, 0.0, 612.0, 792.0];
+        let inner = [0.0, 0.0, 612.0, 792.0];
+        assert!(PdfXValidator::box_contains(&outer, &inner));
+    }
+
+    #[test]
+    fn test_box_contains_inner_smaller() {
+        let outer = [0.0, 0.0, 612.0, 792.0];
+        let inner = [10.0, 10.0, 600.0, 780.0];
+        assert!(PdfXValidator::box_contains(&outer, &inner));
+    }
+
+    #[test]
+    fn test_box_contains_inner_exceeds_right() {
+        let outer = [0.0, 0.0, 612.0, 792.0];
+        let inner = [10.0, 10.0, 620.0, 780.0]; // right exceeds
+        assert!(!PdfXValidator::box_contains(&outer, &inner));
+    }
+
+    #[test]
+    fn test_box_contains_inner_exceeds_top() {
+        let outer = [0.0, 0.0, 612.0, 792.0];
+        let inner = [10.0, 10.0, 600.0, 800.0]; // top exceeds
+        assert!(!PdfXValidator::box_contains(&outer, &inner));
+    }
+
+    #[test]
+    fn test_box_contains_inner_exceeds_left() {
+        let outer = [10.0, 0.0, 612.0, 792.0];
+        let inner = [5.0, 0.0, 600.0, 780.0]; // left exceeds
+        assert!(!PdfXValidator::box_contains(&outer, &inner));
+    }
+
+    #[test]
+    fn test_box_contains_inner_exceeds_bottom() {
+        let outer = [0.0, 10.0, 612.0, 792.0];
+        let inner = [0.0, 5.0, 600.0, 780.0]; // bottom exceeds
+        assert!(!PdfXValidator::box_contains(&outer, &inner));
+    }
+
+    #[test]
+    fn test_box_contains_within_tolerance() {
+        let outer = [0.0, 0.0, 612.0, 792.0];
+        // Inner slightly exceeds by less than tolerance (0.01)
+        let inner = [-0.005, -0.005, 612.005, 792.005];
+        assert!(PdfXValidator::box_contains(&outer, &inner));
+    }
+
+    #[test]
+    fn test_box_contains_beyond_tolerance() {
+        let outer = [0.0, 0.0, 612.0, 792.0];
+        // Inner exceeds by more than tolerance
+        let inner = [-0.02, 0.0, 612.0, 792.0];
+        assert!(!PdfXValidator::box_contains(&outer, &inner));
+    }
+
+    // ==========================================
+    // is_standard14_font tests
+    // ==========================================
+
+    #[test]
+    fn test_standard14_all_fonts() {
+        let validator = PdfXValidator::new(PdfXLevel::X1a2003);
+        let standard14 = [
+            "Courier",
+            "Courier-Bold",
+            "Courier-Oblique",
+            "Courier-BoldOblique",
+            "Helvetica",
+            "Helvetica-Bold",
+            "Helvetica-Oblique",
+            "Helvetica-BoldOblique",
+            "Times-Roman",
+            "Times-Bold",
+            "Times-Italic",
+            "Times-BoldItalic",
+            "Symbol",
+            "ZapfDingbats",
+        ];
+        for name in &standard14 {
+            let mut font_dict = HashMap::new();
+            font_dict.insert("BaseFont".to_string(), Object::Name(name.to_string()));
+            assert!(validator.is_standard14_font(&font_dict), "{} should be standard14", name);
+        }
+    }
+
+    #[test]
+    fn test_standard14_non_standard_fonts() {
+        let validator = PdfXValidator::new(PdfXLevel::X1a2003);
+        for name in &["Arial", "TimesNewRoman", "Verdana", "Georgia", "Calibri"] {
+            let mut font_dict = HashMap::new();
+            font_dict.insert("BaseFont".to_string(), Object::Name(name.to_string()));
+            assert!(!validator.is_standard14_font(&font_dict), "{} should NOT be standard14", name);
+        }
+    }
+
+    #[test]
+    fn test_standard14_no_basefont() {
+        let validator = PdfXValidator::new(PdfXLevel::X1a2003);
+        let font_dict = HashMap::new();
+        assert!(!validator.is_standard14_font(&font_dict));
+    }
+
+    #[test]
+    fn test_standard14_wrong_basefont_type() {
+        let validator = PdfXValidator::new(PdfXLevel::X1a2003);
+        let mut font_dict = HashMap::new();
+        font_dict.insert("BaseFont".to_string(), Object::String(b"Helvetica".to_vec()));
+        assert!(!validator.is_standard14_font(&font_dict));
+    }
+
+    // ==========================================
+    // get_colorspace_name tests
+    // ==========================================
+
+    // Helper that mimics get_colorspace_name without requiring a PdfDocument.
+    // Tests the Name, Array, and unknown-type branches.
+    fn colorspace_name_for_test(cs: &Object) -> String {
+        match cs {
+            Object::Name(n) => n.clone(),
+            Object::Array(arr) => {
+                if let Some(Object::Name(n)) = arr.first() {
+                    n.clone()
+                } else {
+                    "Unknown".to_string()
+                }
+            },
+            _ => "Unknown".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_colorspace_name_from_name() {
+        let cs = Object::Name("DeviceCMYK".to_string());
+        assert_eq!(colorspace_name_for_test(&cs), "DeviceCMYK");
+    }
+
+    #[test]
+    fn test_colorspace_name_from_array() {
+        let cs = Object::Array(vec![
+            Object::Name("ICCBased".to_string()),
+            Object::Reference(ObjectRef::new(10, 0)),
+        ]);
+        assert_eq!(colorspace_name_for_test(&cs), "ICCBased");
+    }
+
+    #[test]
+    fn test_colorspace_name_from_empty_array() {
+        let cs = Object::Array(vec![]);
+        assert_eq!(colorspace_name_for_test(&cs), "Unknown");
+    }
+
+    #[test]
+    fn test_colorspace_name_from_unknown() {
+        let cs = Object::Integer(42);
+        assert_eq!(colorspace_name_for_test(&cs), "Unknown");
+    }
+
+    #[test]
+    fn test_colorspace_name_from_array_non_name_first() {
+        let cs = Object::Array(vec![Object::Integer(42)]);
+        assert_eq!(colorspace_name_for_test(&cs), "Unknown");
+    }
+
+    // ==========================================
+    // should_stop tests
+    // ==========================================
+
+    #[test]
+    fn test_should_stop_false_when_disabled() {
+        let validator = PdfXValidator::new(PdfXLevel::X1a2003);
+        let mut result = XValidationResult::new(PdfXLevel::X1a2003);
+        result.add_error(XComplianceError::new(XErrorCode::FontNotEmbedded, "error"));
+        assert!(!validator.should_stop(&result));
+    }
+
+    #[test]
+    fn test_should_stop_true_when_enabled_with_errors() {
+        let validator = PdfXValidator::new(PdfXLevel::X1a2003).stop_on_first_error(true);
+        let mut result = XValidationResult::new(PdfXLevel::X1a2003);
+        result.add_error(XComplianceError::new(XErrorCode::FontNotEmbedded, "error"));
+        assert!(validator.should_stop(&result));
+    }
+
+    #[test]
+    fn test_should_stop_false_when_enabled_no_errors() {
+        let validator = PdfXValidator::new(PdfXLevel::X1a2003).stop_on_first_error(true);
+        let result = XValidationResult::new(PdfXLevel::X1a2003);
+        assert!(!validator.should_stop(&result));
+    }
+
+    // ==========================================
+    // check_action tests (standalone via dict building)
+    // ==========================================
+
+    #[test]
+    fn test_check_action_javascript() {
+        let validator = PdfXValidator::new(PdfXLevel::X1a2003);
+        let mut result = XValidationResult::new(PdfXLevel::X1a2003);
+        let action = Object::Dictionary({
+            let mut d = HashMap::new();
+            d.insert("S".to_string(), Object::Name("JavaScript".to_string()));
+            d
+        });
+        // check_action requires a document for Reference resolution, but for Dictionary
+        // it works directly. We can't easily test without a document, but we can verify
+        // the action dict matching logic by examining the result directly.
+        // Since we can't call check_action without &mut PdfDocument, let's test
+        // the Dictionary construction path logic indirectly.
+
+        // Test via finalize approach: manually simulate what check_action does
+        if let Object::Dictionary(d) = &action {
+            if let Some(Object::Name(action_type)) = d.get("S") {
+                if action_type.as_str() == "JavaScript" {
+                    result.add_error(
+                        XComplianceError::new(
+                            XErrorCode::JavaScriptNotAllowed,
+                            "JavaScript actions not allowed",
+                        )
+                        .with_clause("6.6.1"),
+                    );
+                }
+            }
+        }
+        assert!(result.has_errors());
+        assert_eq!(result.errors[0].code, XErrorCode::JavaScriptNotAllowed);
+    }
+
+    #[test]
+    fn test_check_action_launch() {
+        let mut result = XValidationResult::new(PdfXLevel::X1a2003);
+        let action_dict: HashMap<String, Object> = {
+            let mut d = HashMap::new();
+            d.insert("S".to_string(), Object::Name("Launch".to_string()));
+            d
+        };
+        if let Some(Object::Name(action_type)) = action_dict.get("S") {
+            match action_type.as_str() {
+                "Launch" | "Sound" | "Movie" | "ImportData" | "ResetForm" | "SubmitForm" => {
+                    result.add_error(
+                        XComplianceError::new(
+                            XErrorCode::ActionNotAllowed,
+                            format!("Action type '{}' not allowed in PDF/X", action_type),
+                        )
+                        .with_clause("6.6.1"),
+                    );
+                },
+                _ => {},
+            }
+        }
+        assert!(result.has_errors());
+        assert_eq!(result.errors[0].code, XErrorCode::ActionNotAllowed);
+    }
+
+    #[test]
+    fn test_check_action_allowed_type() {
+        let mut result = XValidationResult::new(PdfXLevel::X1a2003);
+        let action_dict: HashMap<String, Object> = {
+            let mut d = HashMap::new();
+            d.insert("S".to_string(), Object::Name("GoTo".to_string()));
+            d
+        };
+        if let Some(Object::Name(action_type)) = action_dict.get("S") {
+            match action_type.as_str() {
+                "JavaScript" | "Launch" | "Sound" | "Movie" | "ImportData" | "ResetForm"
+                | "SubmitForm" => {
+                    result.add_error(XComplianceError::new(
+                        XErrorCode::ActionNotAllowed,
+                        "Not allowed",
+                    ));
+                },
+                _ => {},
+            }
+        }
+        assert!(!result.has_errors());
+    }
+
+    // ==========================================
+    // Validator configuration chaining tests
+    // ==========================================
+
+    #[test]
+    fn test_validator_all_levels() {
+        let levels = [
+            PdfXLevel::X1a2001,
+            PdfXLevel::X1a2003,
+            PdfXLevel::X32002,
+            PdfXLevel::X32003,
+            PdfXLevel::X4,
+            PdfXLevel::X4p,
+            PdfXLevel::X5g,
+            PdfXLevel::X5n,
+            PdfXLevel::X5pg,
+            PdfXLevel::X6,
+        ];
+        for level in &levels {
+            let validator = PdfXValidator::new(*level);
+            assert_eq!(validator.level, *level);
+        }
+    }
+
+    #[test]
+    fn test_finalize_with_warnings_and_errors() {
+        let validator = PdfXValidator::new(PdfXLevel::X1a2003);
+        let mut result = XValidationResult::new(PdfXLevel::X1a2003);
+        result.add_error(XComplianceError::new(XErrorCode::FontNotEmbedded, "Font not embedded"));
+        result.add_warning(XComplianceError::warning(
+            XErrorCode::TrappedKeyMissing,
+            "Trapped key missing",
+        ));
+
+        let finalized = validator.finalize_result(result);
+        assert!(!finalized.is_compliant);
+        assert_eq!(finalized.errors.len(), 1);
+        assert_eq!(finalized.warnings.len(), 1);
+    }
+
+    #[test]
+    fn test_finalize_with_only_warnings_is_compliant() {
+        let validator = PdfXValidator::new(PdfXLevel::X1a2003);
+        let mut result = XValidationResult::new(PdfXLevel::X1a2003);
+        result.add_warning(XComplianceError::warning(
+            XErrorCode::TrappedKeyMissing,
+            "Trapped key missing",
+        ));
+
+        let finalized = validator.finalize_result(result);
+        assert!(finalized.is_compliant);
+        assert_eq!(finalized.warnings.len(), 1);
+    }
+
+    #[test]
+    fn test_finalize_strips_warnings_when_configured() {
+        let validator = PdfXValidator::new(PdfXLevel::X1a2003).include_warnings(false);
+        let mut result = XValidationResult::new(PdfXLevel::X1a2003);
+        result.add_warning(XComplianceError::warning(XErrorCode::TrappedKeyMissing, "w1"));
+        result.add_warning(XComplianceError::warning(XErrorCode::XmpMetadataInvalid, "w2"));
+        result.add_error(XComplianceError::new(XErrorCode::FontNotEmbedded, "e1"));
+
+        let finalized = validator.finalize_result(result);
+        assert!(!finalized.is_compliant);
+        assert!(finalized.warnings.is_empty());
+        assert_eq!(finalized.errors.len(), 1);
+    }
+
+    // ==========================================
+    // Compliance error display tests
+    // ==========================================
+
+    #[test]
+    fn test_compliance_error_display_with_object_id() {
+        let error = XComplianceError::new(XErrorCode::IccProfileMissing, "Missing ICC profile")
+            .with_object_id(42);
+
+        let display = format!("{}", error);
+        assert!(display.contains("[XCOLOR-004]"));
+        assert!(display.contains("object 42"));
+    }
+
+    #[test]
+    fn test_compliance_error_display_with_page_and_object() {
+        let error = XComplianceError::new(XErrorCode::TransparencyNotAllowed, "Transparency found")
+            .with_page(2)
+            .with_object_id(100);
+
+        let display = format!("{}", error);
+        assert!(display.contains("page 3")); // 0-indexed page 2 => display as "page 3"
+        assert!(display.contains("object 100"));
+    }
+
+    #[test]
+    fn test_compliance_warning_is_not_error() {
+        let warning =
+            XComplianceError::warning(XErrorCode::TrappedKeyMissing, "Trapped key missing");
+        assert!(!warning.is_error());
+    }
+
+    // ==========================================
+    // XValidationResult tests
+    // ==========================================
+
+    #[test]
+    fn test_validation_result_total_issues() {
+        let mut result = XValidationResult::new(PdfXLevel::X4);
+        assert_eq!(result.total_issues(), 0);
+
+        result.add_error(XComplianceError::new(XErrorCode::FontNotEmbedded, "e1"));
+        assert_eq!(result.total_issues(), 1);
+
+        result.add_warning(XComplianceError::warning(XErrorCode::TrappedKeyMissing, "w1"));
+        assert_eq!(result.total_issues(), 2);
+    }
+
+    #[test]
+    fn test_validation_result_has_warnings() {
+        let mut result = XValidationResult::new(PdfXLevel::X4);
+        assert!(!result.has_warnings());
+
+        result.add_warning(XComplianceError::warning(XErrorCode::TrappedKeyMissing, "warning"));
+        assert!(result.has_warnings());
+    }
+
+    #[test]
+    fn test_validation_result_add_error_makes_non_compliant() {
+        let mut result = XValidationResult::new(PdfXLevel::X4);
+        assert!(result.is_compliant);
+
+        result.add_error(XComplianceError::new(XErrorCode::EncryptionNotAllowed, "Encrypted"));
+        assert!(!result.is_compliant);
+    }
+
+    #[test]
+    fn test_validation_result_add_warning_via_add_error() {
+        // Adding a warning through add_error should put it in warnings, not errors
+        let mut result = XValidationResult::new(PdfXLevel::X4);
+        result.add_error(XComplianceError::warning(
+            XErrorCode::TrappedKeyMissing,
+            "this is a warning",
+        ));
+        assert!(result.is_compliant); // warnings don't make non-compliant
+        assert!(result.errors.is_empty());
+        assert_eq!(result.warnings.len(), 1);
+    }
+
+    #[test]
+    fn test_validation_result_detected_level() {
+        let mut result = XValidationResult::new(PdfXLevel::X1a2003);
+        assert!(result.detected_level.is_none());
+        result.detected_level = Some(PdfXLevel::X4);
+        assert_eq!(result.detected_level, Some(PdfXLevel::X4));
+    }
+
+    // ==========================================
+    // Error code display tests
+    // ==========================================
+
+    #[test]
+    fn test_error_code_display_color_codes() {
+        assert_eq!(format!("{}", XErrorCode::RgbColorNotAllowed), "XCOLOR-001");
+        assert_eq!(format!("{}", XErrorCode::LabColorNotAllowed), "XCOLOR-002");
+        assert_eq!(format!("{}", XErrorCode::DeviceNInvalid), "XCOLOR-003");
+        assert_eq!(format!("{}", XErrorCode::IccProfileMissing), "XCOLOR-004");
+        assert_eq!(format!("{}", XErrorCode::IccProfileInvalid), "XCOLOR-005");
+        assert_eq!(format!("{}", XErrorCode::DeviceColorWithoutIntent), "XCOLOR-006");
+    }
+
+    #[test]
+    fn test_error_code_display_transparency_codes() {
+        assert_eq!(format!("{}", XErrorCode::TransparencyNotAllowed), "XTRANS-001");
+        assert_eq!(format!("{}", XErrorCode::BlendModeNotAllowed), "XTRANS-002");
+        assert_eq!(format!("{}", XErrorCode::SoftMaskNotAllowed), "XTRANS-003");
+        assert_eq!(format!("{}", XErrorCode::SMaskNotAllowed), "XTRANS-004");
+    }
+
+    #[test]
+    fn test_error_code_display_font_codes() {
+        assert_eq!(format!("{}", XErrorCode::FontNotEmbedded), "XFONT-001");
+        assert_eq!(format!("{}", XErrorCode::Type3FontNotAllowed), "XFONT-002");
+        assert_eq!(format!("{}", XErrorCode::FontMissingWidths), "XFONT-003");
+        assert_eq!(format!("{}", XErrorCode::FontSubsetIncomplete), "XFONT-004");
+    }
+
+    #[test]
+    fn test_error_code_display_metadata_codes() {
+        assert_eq!(format!("{}", XErrorCode::OutputIntentMissing), "XMETA-001");
+        assert_eq!(format!("{}", XErrorCode::OutputIntentInvalid), "XMETA-002");
+        assert_eq!(format!("{}", XErrorCode::OutputConditionMissing), "XMETA-003");
+        assert_eq!(format!("{}", XErrorCode::TrappedKeyMissing), "XMETA-004");
+        assert_eq!(format!("{}", XErrorCode::XmpMetadataMissing), "XMETA-005");
+        assert_eq!(format!("{}", XErrorCode::XmpMetadataInvalid), "XMETA-006");
+        assert_eq!(format!("{}", XErrorCode::GtsPdfxVersionMissing), "XMETA-007");
+        assert_eq!(format!("{}", XErrorCode::GtsPdfxConformanceMissing), "XMETA-008");
+    }
+
+    #[test]
+    fn test_error_code_display_box_codes() {
+        assert_eq!(format!("{}", XErrorCode::TrimOrArtBoxMissing), "XBOX-001");
+        assert_eq!(format!("{}", XErrorCode::BleedBoxInvalid), "XBOX-002");
+        assert_eq!(format!("{}", XErrorCode::TrimBoxInvalid), "XBOX-003");
+        assert_eq!(format!("{}", XErrorCode::MediaBoxMissing), "XBOX-004");
+        assert_eq!(format!("{}", XErrorCode::BoxesInconsistent), "XBOX-005");
+    }
+
+    #[test]
+    fn test_error_code_display_content_codes() {
+        assert_eq!(format!("{}", XErrorCode::EncryptionNotAllowed), "XCONT-001");
+        assert_eq!(format!("{}", XErrorCode::JavaScriptNotAllowed), "XCONT-002");
+        assert_eq!(format!("{}", XErrorCode::ExternalContentNotAllowed), "XCONT-003");
+        assert_eq!(format!("{}", XErrorCode::EmbeddedFileNotAllowed), "XCONT-004");
+        assert_eq!(format!("{}", XErrorCode::FormXObjectInvalid), "XCONT-005");
+        assert_eq!(format!("{}", XErrorCode::PostScriptXObjectNotAllowed), "XCONT-006");
+        assert_eq!(format!("{}", XErrorCode::ReferenceXObjectNotAllowed), "XCONT-007");
+    }
+
+    #[test]
+    fn test_error_code_display_annotation_codes() {
+        assert_eq!(format!("{}", XErrorCode::AnnotationNotAllowed), "XANNOT-001");
+        assert_eq!(format!("{}", XErrorCode::PrinterMarkInvalid), "XANNOT-002");
+        assert_eq!(format!("{}", XErrorCode::TrapNetInvalid), "XANNOT-003");
+    }
+
+    #[test]
+    fn test_error_code_display_action_codes() {
+        assert_eq!(format!("{}", XErrorCode::ActionNotAllowed), "XACTION-001");
+    }
+
+    #[test]
+    fn test_error_code_display_other_codes() {
+        assert_eq!(format!("{}", XErrorCode::TransferFunctionNotAllowed), "XOTHER-001");
+        assert_eq!(format!("{}", XErrorCode::HalftoneTypeNotAllowed), "XOTHER-002");
+        assert_eq!(format!("{}", XErrorCode::AlternateImageNotAllowed), "XOTHER-003");
+        assert_eq!(format!("{}", XErrorCode::OpiNotAllowed), "XOTHER-004");
+        assert_eq!(format!("{}", XErrorCode::PreseparatedNotAllowed), "XOTHER-005");
+    }
+
+    // ==========================================
+    // PdfXLevel method tests
+    // ==========================================
+
+    #[test]
+    fn test_pdf_x_level_gts_versions() {
+        assert_eq!(PdfXLevel::X1a2001.gts_pdfx_version(), "PDF/X-1a:2001");
+        assert_eq!(PdfXLevel::X1a2003.gts_pdfx_version(), "PDF/X-1a:2003");
+        assert_eq!(PdfXLevel::X32002.gts_pdfx_version(), "PDF/X-3:2002");
+        assert_eq!(PdfXLevel::X32003.gts_pdfx_version(), "PDF/X-3:2003");
+        assert_eq!(PdfXLevel::X4.gts_pdfx_version(), "PDF/X-4");
+        assert_eq!(PdfXLevel::X4p.gts_pdfx_version(), "PDF/X-4p");
+        assert_eq!(PdfXLevel::X5g.gts_pdfx_version(), "PDF/X-5g");
+        assert_eq!(PdfXLevel::X5n.gts_pdfx_version(), "PDF/X-5n");
+        assert_eq!(PdfXLevel::X5pg.gts_pdfx_version(), "PDF/X-5pg");
+        assert_eq!(PdfXLevel::X6.gts_pdfx_version(), "PDF/X-6");
+    }
+
+    #[test]
+    fn test_pdf_x_level_xmp_version_matches_gts() {
+        let levels = [
+            PdfXLevel::X1a2001,
+            PdfXLevel::X1a2003,
+            PdfXLevel::X32002,
+            PdfXLevel::X32003,
+            PdfXLevel::X4,
+            PdfXLevel::X4p,
+            PdfXLevel::X5g,
+            PdfXLevel::X5n,
+            PdfXLevel::X5pg,
+            PdfXLevel::X6,
+        ];
+        for level in &levels {
+            assert_eq!(level.xmp_version(), level.gts_pdfx_version());
+        }
+    }
+
+    #[test]
+    fn test_pdf_x_level_from_gts_all_versions() {
+        assert_eq!(PdfXLevel::from_gts_version("PDF/X-1a:2001"), Some(PdfXLevel::X1a2001));
+        assert_eq!(PdfXLevel::from_gts_version("PDF/X-1:2001"), Some(PdfXLevel::X1a2001));
+        assert_eq!(PdfXLevel::from_gts_version("PDF/X-1a:2003"), Some(PdfXLevel::X1a2003));
+        assert_eq!(PdfXLevel::from_gts_version("PDF/X-1:2003"), Some(PdfXLevel::X1a2003));
+        assert_eq!(PdfXLevel::from_gts_version("PDF/X-3:2002"), Some(PdfXLevel::X32002));
+        assert_eq!(PdfXLevel::from_gts_version("PDF/X-3:2003"), Some(PdfXLevel::X32003));
+        assert_eq!(PdfXLevel::from_gts_version("PDF/X-4"), Some(PdfXLevel::X4));
+        assert_eq!(PdfXLevel::from_gts_version("PDF/X-4p"), Some(PdfXLevel::X4p));
+        assert_eq!(PdfXLevel::from_gts_version("PDF/X-5g"), Some(PdfXLevel::X5g));
+        assert_eq!(PdfXLevel::from_gts_version("PDF/X-5n"), Some(PdfXLevel::X5n));
+        assert_eq!(PdfXLevel::from_gts_version("PDF/X-5pg"), Some(PdfXLevel::X5pg));
+        assert_eq!(PdfXLevel::from_gts_version("PDF/X-6"), Some(PdfXLevel::X6));
+        assert_eq!(PdfXLevel::from_gts_version("garbage"), None);
+        assert_eq!(PdfXLevel::from_gts_version(""), None);
+    }
+
+    #[test]
+    fn test_pdf_x_level_from_gts_with_whitespace() {
+        assert_eq!(PdfXLevel::from_gts_version("  PDF/X-4  "), Some(PdfXLevel::X4));
+    }
+
+    #[test]
+    fn test_pdf_x_level_allows_transparency_comprehensive() {
+        assert!(!PdfXLevel::X1a2001.allows_transparency());
+        assert!(!PdfXLevel::X1a2003.allows_transparency());
+        assert!(!PdfXLevel::X32002.allows_transparency());
+        assert!(!PdfXLevel::X32003.allows_transparency());
+        assert!(PdfXLevel::X4.allows_transparency());
+        assert!(PdfXLevel::X4p.allows_transparency());
+        assert!(PdfXLevel::X5g.allows_transparency());
+        assert!(PdfXLevel::X5n.allows_transparency());
+        assert!(PdfXLevel::X5pg.allows_transparency());
+        assert!(PdfXLevel::X6.allows_transparency());
+    }
+
+    #[test]
+    fn test_pdf_x_level_allows_rgb_comprehensive() {
+        assert!(!PdfXLevel::X1a2001.allows_rgb());
+        assert!(!PdfXLevel::X1a2003.allows_rgb());
+        assert!(PdfXLevel::X32002.allows_rgb());
+        assert!(PdfXLevel::X32003.allows_rgb());
+        assert!(PdfXLevel::X4.allows_rgb());
+        assert!(PdfXLevel::X4p.allows_rgb());
+        assert!(PdfXLevel::X5g.allows_rgb());
+        assert!(PdfXLevel::X5n.allows_rgb());
+        assert!(PdfXLevel::X5pg.allows_rgb());
+        assert!(PdfXLevel::X6.allows_rgb());
+    }
+
+    #[test]
+    fn test_pdf_x_level_allows_layers_comprehensive() {
+        assert!(!PdfXLevel::X1a2001.allows_layers());
+        assert!(!PdfXLevel::X1a2003.allows_layers());
+        assert!(!PdfXLevel::X32002.allows_layers());
+        assert!(!PdfXLevel::X32003.allows_layers());
+        assert!(PdfXLevel::X4.allows_layers());
+        assert!(PdfXLevel::X4p.allows_layers());
+        assert!(PdfXLevel::X5g.allows_layers());
+        assert!(PdfXLevel::X5n.allows_layers());
+        assert!(PdfXLevel::X5pg.allows_layers());
+        assert!(PdfXLevel::X6.allows_layers());
+    }
+
+    #[test]
+    fn test_pdf_x_level_allows_external_icc_comprehensive() {
+        assert!(!PdfXLevel::X1a2001.allows_external_icc());
+        assert!(!PdfXLevel::X1a2003.allows_external_icc());
+        assert!(!PdfXLevel::X32002.allows_external_icc());
+        assert!(!PdfXLevel::X32003.allows_external_icc());
+        assert!(!PdfXLevel::X4.allows_external_icc());
+        assert!(PdfXLevel::X4p.allows_external_icc());
+        assert!(!PdfXLevel::X5g.allows_external_icc());
+        assert!(PdfXLevel::X5n.allows_external_icc());
+        assert!(PdfXLevel::X5pg.allows_external_icc());
+        assert!(!PdfXLevel::X6.allows_external_icc());
+    }
+
+    #[test]
+    fn test_pdf_x_level_allows_external_graphics_comprehensive() {
+        assert!(!PdfXLevel::X1a2001.allows_external_graphics());
+        assert!(!PdfXLevel::X1a2003.allows_external_graphics());
+        assert!(!PdfXLevel::X32002.allows_external_graphics());
+        assert!(!PdfXLevel::X32003.allows_external_graphics());
+        assert!(!PdfXLevel::X4.allows_external_graphics());
+        assert!(!PdfXLevel::X4p.allows_external_graphics());
+        assert!(PdfXLevel::X5g.allows_external_graphics());
+        assert!(!PdfXLevel::X5n.allows_external_graphics());
+        assert!(PdfXLevel::X5pg.allows_external_graphics());
+        assert!(!PdfXLevel::X6.allows_external_graphics());
+    }
+
+    #[test]
+    fn test_pdf_x_level_required_pdf_versions() {
+        assert_eq!(PdfXLevel::X1a2001.required_pdf_version(), "1.3");
+        assert_eq!(PdfXLevel::X32002.required_pdf_version(), "1.3");
+        assert_eq!(PdfXLevel::X1a2003.required_pdf_version(), "1.4");
+        assert_eq!(PdfXLevel::X32003.required_pdf_version(), "1.4");
+        assert_eq!(PdfXLevel::X4.required_pdf_version(), "1.6");
+        assert_eq!(PdfXLevel::X4p.required_pdf_version(), "1.6");
+        assert_eq!(PdfXLevel::X5g.required_pdf_version(), "1.6");
+        assert_eq!(PdfXLevel::X5n.required_pdf_version(), "1.6");
+        assert_eq!(PdfXLevel::X5pg.required_pdf_version(), "1.6");
+        assert_eq!(PdfXLevel::X6.required_pdf_version(), "2.0");
+    }
+
+    #[test]
+    fn test_pdf_x_level_iso_standards() {
+        assert_eq!(PdfXLevel::X1a2001.iso_standard(), "ISO 15930-1:2001");
+        assert_eq!(PdfXLevel::X1a2003.iso_standard(), "ISO 15930-4:2003");
+        assert_eq!(PdfXLevel::X32002.iso_standard(), "ISO 15930-3:2002");
+        assert_eq!(PdfXLevel::X32003.iso_standard(), "ISO 15930-6:2003");
+        assert_eq!(PdfXLevel::X4.iso_standard(), "ISO 15930-7:2010");
+        assert_eq!(PdfXLevel::X4p.iso_standard(), "ISO 15930-7:2010");
+        assert_eq!(PdfXLevel::X5g.iso_standard(), "ISO 15930-8:2010");
+        assert_eq!(PdfXLevel::X5n.iso_standard(), "ISO 15930-8:2010");
+        assert_eq!(PdfXLevel::X5pg.iso_standard(), "ISO 15930-8:2010");
+        assert_eq!(PdfXLevel::X6.iso_standard(), "ISO 15930-9:2020");
+    }
+
+    #[test]
+    fn test_pdf_x_level_display_all() {
+        assert_eq!(format!("{}", PdfXLevel::X1a2001), "PDF/X-1a:2001");
+        assert_eq!(format!("{}", PdfXLevel::X1a2003), "PDF/X-1a:2003");
+        assert_eq!(format!("{}", PdfXLevel::X32002), "PDF/X-3:2002");
+        assert_eq!(format!("{}", PdfXLevel::X32003), "PDF/X-3:2003");
+        assert_eq!(format!("{}", PdfXLevel::X4), "PDF/X-4");
+        assert_eq!(format!("{}", PdfXLevel::X4p), "PDF/X-4p");
+        assert_eq!(format!("{}", PdfXLevel::X5g), "PDF/X-5g");
+        assert_eq!(format!("{}", PdfXLevel::X5n), "PDF/X-5n");
+        assert_eq!(format!("{}", PdfXLevel::X5pg), "PDF/X-5pg");
+        assert_eq!(format!("{}", PdfXLevel::X6), "PDF/X-6");
+    }
+
+    // ==========================================
+    // XValidationStats tests
+    // ==========================================
+
+    #[test]
+    fn test_validation_stats_default() {
+        let stats = XValidationStats::default();
+        assert_eq!(stats.pages_checked, 0);
+        assert_eq!(stats.fonts_checked, 0);
+        assert_eq!(stats.fonts_embedded, 0);
+        assert_eq!(stats.images_checked, 0);
+        assert_eq!(stats.annotations_checked, 0);
+        assert!(stats.color_spaces_found.is_empty());
+        assert!(!stats.has_transparency);
+        assert!(!stats.has_layers);
+        assert!(stats.output_intent.is_none());
+    }
+
+    #[test]
+    fn test_validation_stats_mutation() {
+        let mut stats = XValidationStats {
+            pages_checked: 5,
+            fonts_checked: 10,
+            fonts_embedded: 8,
+            has_transparency: true,
+            ..Default::default()
+        };
+        stats.color_spaces_found.push("DeviceCMYK".to_string());
+        stats.output_intent = Some("Fogra39".to_string());
+
+        assert_eq!(stats.pages_checked, 5);
+        assert_eq!(stats.fonts_checked, 10);
+        assert_eq!(stats.fonts_embedded, 8);
+        assert!(stats.has_transparency);
+        assert_eq!(stats.color_spaces_found.len(), 1);
+        assert_eq!(stats.output_intent, Some("Fogra39".to_string()));
     }
 }

@@ -21,7 +21,7 @@
 //! PyMuPDF, 15× faster than pypdf, 29× faster than pdfplumber. 100% pass rate on 3,830
 //! real-world PDFs. MIT licensed. A drop-in PyMuPDF alternative with no AGPL restrictions.
 //!
-//! ## Performance (v0.3.9)
+//! ## Performance (v0.3.10)
 //!
 //! Benchmarked against 14 text extraction libraries on 3,830 PDFs from 3 public test suites
 //! (veraPDF, Mozilla pdf.js, DARPA SafeDocs). Single-thread, 60s timeout, no warm-up.
@@ -208,6 +208,15 @@ pub mod debug;
 #[cfg_attr(docsrs, doc(cfg(feature = "signatures")))]
 pub mod signatures;
 
+// Parallel page extraction (optional, v0.3.10)
+#[cfg(feature = "parallel")]
+#[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
+pub mod parallel;
+
+// Batch processing API (v0.3.10)
+#[cfg(not(target_arch = "wasm32"))]
+pub mod batch;
+
 // PDF/A compliance validation (v0.3.0)
 pub mod compliance;
 
@@ -233,7 +242,7 @@ pub mod ocr;
 mod python;
 
 // WASM bindings (optional)
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
@@ -249,6 +258,14 @@ pub use config::{DocumentType, ExtractionProfile};
 pub use document::{ExtractedImageRef, ImageFormat, PdfDocument};
 pub use error::{Error, Result};
 pub use outline::{Destination, OutlineItem};
+
+// Global font cache for batch processing
+pub use fonts::global_cache::{
+    clear_global_font_cache, global_font_cache_stats, set_global_font_cache_capacity,
+};
+
+#[cfg(feature = "parallel")]
+pub use parallel::{extract_all_markdown_parallel, extract_all_text_parallel, ParallelExtractor};
 
 // Internal utilities
 pub(crate) mod utils {

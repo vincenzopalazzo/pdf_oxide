@@ -77,7 +77,8 @@ pdf_oxide/
 │   ├── ARCHITECTURE.md       # System design
 │   ├── DEVELOPMENT_GUIDE.md  # This file
 │   ├── MARKDOWN_CONVERTER_USAGE.md # Markdown export guide
-│   └── ML_INTEGRATION.md     # OCR and ML features
+│   ├── OCR_GUIDE.md          # OCR model selection and configuration
+│   └── ML_INTEGRATION.md     # OCR and ML features (planned)
 │
 ├── src/
 │   ├── lib.rs                # Library entry point
@@ -694,7 +695,7 @@ Brief description of the feature or fix being implemented.
 - [AGENTS.md](../AGENTS.md) - Project context for Agents
 - [ARCHITECTURE.md](ARCHITECTURE.md) - System architecture overview
 - [CONTRIBUTING.md](../CONTRIBUTING.md) - Contribution guidelines
-- [ML_INTEGRATION.md](ML_INTEGRATION.md) - OCR and ML features guide
+- [OCR_GUIDE.md](OCR_GUIDE.md) - OCR model selection, configuration, and troubleshooting
 - [MARKDOWN_CONVERTER_USAGE.md](MARKDOWN_CONVERTER_USAGE.md) - Markdown export feature guide
 
 ### External References

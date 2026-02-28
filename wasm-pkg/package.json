@@ -1,0 +1,27 @@
+{
+  "name": "pdf-oxide-wasm",
+  "version": "0.3.10",
+  "description": "High-performance PDF text extraction and manipulation via WebAssembly",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yfedoseev/pdf_oxide"
+  },
+  "homepage": "https://github.com/yfedoseev/pdf_oxide/blob/main/docs/getting-started-wasm.md",
+  "files": [
+    "pdf_oxide_bg.wasm",
+    "pdf_oxide.js",
+    "pdf_oxide.d.ts",
+    "pdf_oxide_bg.wasm.d.ts",
+    "README.md"
+  ],
+  "main": "pdf_oxide.js",
+  "types": "pdf_oxide.d.ts",
+  "keywords": [
+    "pdf",
+    "wasm",
+    "webassembly",
+    "text-extraction",
+    "pdf-parser"
+  ]
+}

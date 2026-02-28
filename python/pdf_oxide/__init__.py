@@ -56,7 +56,15 @@ from .pdf_oxide import (
     Pdf,
     PdfDocument,
     RadialGradient,
+    # Extraction
+    TextSpan,
 )
+
+# OCR classes are only available when built with the 'ocr' feature
+try:
+    from .pdf_oxide import OcrConfig, OcrEngine
+except ImportError:
+    pass
 
 
 __all__ = [
@@ -73,5 +81,10 @@ __all__ = [
     "LineCap",
     "LineJoin",
     "PatternPresets",
+    # Extraction
+    "TextSpan",
+    # OCR (feature-gated)
+    "OcrEngine",
+    "OcrConfig",
 ]
 __version__ = VERSION

@@ -52,6 +52,11 @@ cargo add pdf_oxide
 pip install pdf_oxide
 ```
 
+**JavaScript/WASM (npm)**
+```bash
+npm install pdf-oxide-wasm
+```
+
 **Pre-built Binaries**
 Download archives for Linux, macOS, and Windows from the assets below.
 

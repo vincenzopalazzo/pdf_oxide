@@ -224,8 +224,21 @@ struct RowCluster {
 struct GridStructure {
     /// Column definitions (left to right)
     columns: Vec<ColumnCluster>,
+    /// Row definitions (top to bottom)
+    rows: Vec<RowCluster>,
     /// Grid cells: cells[row_idx][col_idx] = Vec<span_indices>
     cells: Vec<Vec<Vec<usize>>>,
+}
+
+/// Merge info for a cell in the grid (colspan/rowspan).
+#[derive(Debug, Clone)]
+struct CellMergeInfo {
+    /// Number of columns this cell spans
+    colspan: u32,
+    /// Number of rows this cell spans
+    rowspan: u32,
+    /// Whether this cell is covered by another cell's span (should be skipped in output)
+    covered: bool,
 }
 
 /// Detect column structure via X-coordinate clustering
@@ -385,6 +398,7 @@ fn assign_spans_to_cells(
 
     GridStructure {
         columns: columns.to_vec(),
+        rows: rows.to_vec(),
         cells,
     }
 }
@@ -501,7 +515,8 @@ impl SpatialTableDetector {
 /// Convert grid structure to ExtractedTable
 ///
 /// Transforms the internal grid representation into the ExtractedTable format,
-/// including text extraction from cells and header row detection.
+/// including text extraction from cells, merged cell detection, multi-line cell
+/// support, and header row detection based on font properties.
 ///
 /// # Arguments
 /// * `grid` - Grid structure to convert
@@ -510,23 +525,31 @@ impl SpatialTableDetector {
 /// # Returns
 /// * `ExtractedTable` - Formatted table ready for output
 fn grid_to_extracted_table(grid: &GridStructure, spans: &[TextSpan]) -> ExtractedTable {
+    let num_rows = grid.cells.len();
+    let num_cols = grid.columns.len();
+
+    // Detect merged cells (colspan and rowspan)
+    let merge_info = detect_merged_cells(grid, spans);
+
+    // Detect header row using font properties
+    let header_row_idx = detect_header_row(grid, spans);
+
     let mut table_rows = Vec::new();
 
     for (row_idx, row) in grid.cells.iter().enumerate() {
-        let mut table_row = TableRow::new(row_idx == 0); // First row is header
+        let is_header = header_row_idx == Some(row_idx);
+        let mut table_row = TableRow::new(is_header);
 
-        for cell_span_indices in row.iter() {
-            // Extract text from cell spans
-            let cell_text = if cell_span_indices.is_empty() {
-                String::new()
-            } else {
-                // Concatenate text from all spans in this cell with space separator
-                cell_span_indices
-                    .iter()
-                    .filter_map(|&idx| spans.get(idx).map(|s| s.text.as_str()))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            };
+        for (col_idx, cell_span_indices) in row.iter().enumerate() {
+            let mi = &merge_info[row_idx][col_idx];
+
+            // Skip cells covered by another cell's colspan/rowspan
+            if mi.covered {
+                continue;
+            }
+
+            // Extract text from cell spans with multi-line support
+            let cell_text = extract_cell_text(cell_span_indices, spans);
 
             // Extract MCIDs from cell spans
             let mcids = cell_span_indices
@@ -534,23 +557,276 @@ fn grid_to_extracted_table(grid: &GridStructure, spans: &[TextSpan]) -> Extracte
                 .filter_map(|&idx| spans.get(idx).and_then(|s| s.mcid))
                 .collect::<Vec<_>>();
 
+            // Clamp colspan and rowspan to grid bounds
+            let colspan = mi.colspan.min((num_cols - col_idx) as u32);
+            let rowspan = mi.rowspan.min((num_rows - row_idx) as u32);
+
             table_row.cells.push(TableCell {
                 text: cell_text,
-                colspan: 1,
-                rowspan: 1,
+                colspan,
+                rowspan,
                 mcids,
-                is_header: row_idx == 0,
+                is_header,
             });
         }
 
         table_rows.push(table_row);
     }
 
+    let has_header = header_row_idx.is_some();
+
     ExtractedTable {
         rows: table_rows,
-        has_header: true,
-        col_count: grid.columns.len(),
+        has_header,
+        col_count: num_cols,
     }
+}
+
+/// Extract text from a cell's spans with multi-line support.
+///
+/// Spans within a cell are grouped by their Y-coordinate line. Spans on the same
+/// line are joined with spaces, while different lines are joined with newlines.
+/// This handles multi-line cells where content spans multiple vertical positions.
+fn extract_cell_text(cell_span_indices: &[usize], spans: &[TextSpan]) -> String {
+    if cell_span_indices.is_empty() {
+        return String::new();
+    }
+
+    // Collect spans with their Y centers
+    let mut span_entries: Vec<(f32, &str)> = cell_span_indices
+        .iter()
+        .filter_map(|&idx| spans.get(idx).map(|s| (s.bbox.center().y, s.text.as_str())))
+        .collect();
+
+    if span_entries.is_empty() {
+        return String::new();
+    }
+
+    // If only one span, return directly
+    if span_entries.len() == 1 {
+        return span_entries[0].1.to_string();
+    }
+
+    // Sort by Y descending (top-to-bottom in PDF coordinates: higher Y = higher on page)
+    span_entries.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Group spans into lines based on Y proximity (tolerance of 2.0 points)
+    let line_tolerance = 2.0_f32;
+    let mut lines: Vec<Vec<&str>> = Vec::new();
+    let mut current_line: Vec<&str> = vec![span_entries[0].1];
+    let mut current_y = span_entries[0].0;
+
+    for &(y, text) in &span_entries[1..] {
+        if (current_y - y).abs() <= line_tolerance {
+            // Same line
+            current_line.push(text);
+        } else {
+            // New line
+            lines.push(current_line);
+            current_line = vec![text];
+            current_y = y;
+        }
+    }
+    lines.push(current_line);
+
+    // Join spans within lines with spaces, join lines with newlines
+    lines
+        .iter()
+        .map(|line| line.join(" "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Detect merged cells (colspan and rowspan) in the grid.
+///
+/// Algorithm:
+/// 1. For each content cell, check if the span's bounding box extends across
+///    neighboring empty cells in the same row (colspan detection).
+/// 2. For each content cell, check if the span's bounding box extends across
+///    neighboring empty cells in the same column (rowspan detection).
+/// 3. Mark covered cells so they are skipped during output.
+fn detect_merged_cells(grid: &GridStructure, spans: &[TextSpan]) -> Vec<Vec<CellMergeInfo>> {
+    let num_rows = grid.cells.len();
+    let num_cols = grid.columns.len();
+
+    // Initialize merge info: all cells start with colspan=1, rowspan=1, not covered
+    let mut merge_info: Vec<Vec<CellMergeInfo>> = (0..num_rows)
+        .map(|_| {
+            (0..num_cols)
+                .map(|_| CellMergeInfo {
+                    colspan: 1,
+                    rowspan: 1,
+                    covered: false,
+                })
+                .collect()
+        })
+        .collect();
+
+    // Detect colspan: scan each row for content cells followed by empty cells
+    for row_idx in 0..num_rows {
+        for col_idx in 0..num_cols {
+            if grid.cells[row_idx][col_idx].is_empty() {
+                continue;
+            }
+
+            // Get the rightmost extent of spans in this cell
+            let cell_right = grid.cells[row_idx][col_idx]
+                .iter()
+                .filter_map(|&idx| spans.get(idx).map(|s| s.bbox.right()))
+                .fold(f32::NEG_INFINITY, f32::max);
+
+            if cell_right == f32::NEG_INFINITY {
+                continue;
+            }
+
+            // Check how many subsequent empty columns this cell's content extends across
+            let mut extra_cols = 0u32;
+            for next_col in (col_idx + 1)..num_cols {
+                if !grid.cells[row_idx][next_col].is_empty() {
+                    break;
+                }
+                // Check if the content cell's right edge extends past this column's center
+                let col_center = grid.columns[next_col].x_center;
+                if cell_right > col_center {
+                    extra_cols += 1;
+                } else {
+                    break;
+                }
+            }
+
+            if extra_cols > 0 {
+                merge_info[row_idx][col_idx].colspan = 1 + extra_cols;
+                // Mark covered cells
+                for c in 1..=(extra_cols as usize) {
+                    if col_idx + c < num_cols {
+                        merge_info[row_idx][col_idx + c].covered = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Detect rowspan: scan each column for content cells followed by empty cells
+    for col_idx in 0..num_cols {
+        for row_idx in 0..num_rows {
+            if grid.cells[row_idx][col_idx].is_empty() || merge_info[row_idx][col_idx].covered {
+                continue;
+            }
+
+            // Get the bottommost extent of spans in this cell
+            // In PDF coordinates, lower Y = lower on page, but our rows are sorted
+            // top-to-bottom (higher Y first). So "bottom" of a cell means the lowest Y.
+            let cell_bottom = grid.cells[row_idx][col_idx]
+                .iter()
+                .filter_map(|&idx| spans.get(idx).map(|s| s.bbox.bottom()))
+                .fold(f32::INFINITY, f32::min);
+
+            if cell_bottom == f32::INFINITY {
+                continue;
+            }
+
+            // Check how many subsequent empty rows this cell extends across
+            let mut extra_rows = 0u32;
+            for next_row in (row_idx + 1)..num_rows {
+                if !grid.cells[next_row][col_idx].is_empty() {
+                    break;
+                }
+                // Check if the content cell's bottom extends past this row's center
+                let row_center = grid.rows[next_row].y_center;
+                // Remember: rows are sorted descending by Y, so lower row_center = lower on page
+                if cell_bottom < row_center {
+                    extra_rows += 1;
+                } else {
+                    break;
+                }
+            }
+
+            if extra_rows > 0 {
+                merge_info[row_idx][col_idx].rowspan = 1 + extra_rows;
+                // Mark covered cells
+                for r in 1..=(extra_rows as usize) {
+                    if row_idx + r < num_rows {
+                        merge_info[row_idx + r][col_idx].covered = true;
+                    }
+                }
+            }
+        }
+    }
+
+    merge_info
+}
+
+/// Detect the header row based on font properties.
+///
+/// Checks if the first row has different font characteristics (bold weight or larger
+/// font size) compared to subsequent rows. Returns `Some(0)` if a header is detected,
+/// `None` otherwise.
+///
+/// # Detection criteria
+/// - First row has predominantly bold fonts while data rows do not
+/// - First row has a noticeably larger average font size than data rows
+fn detect_header_row(grid: &GridStructure, spans: &[TextSpan]) -> Option<usize> {
+    if grid.cells.is_empty() || grid.cells.len() < 2 {
+        return None;
+    }
+
+    let first_row = &grid.cells[0];
+    let data_rows = &grid.cells[1..];
+
+    // Collect font properties from first row
+    let first_row_spans: Vec<&TextSpan> = first_row
+        .iter()
+        .flat_map(|cell| cell.iter().filter_map(|&idx| spans.get(idx)))
+        .collect();
+
+    if first_row_spans.is_empty() {
+        return None;
+    }
+
+    // Collect font properties from data rows
+    let data_row_spans: Vec<&TextSpan> = data_rows
+        .iter()
+        .flat_map(|row| {
+            row.iter()
+                .flat_map(|cell| cell.iter().filter_map(|&idx| spans.get(idx)))
+        })
+        .collect();
+
+    if data_row_spans.is_empty() {
+        return None;
+    }
+
+    // Check bold ratio in first row vs data rows
+    let first_row_bold_count = first_row_spans
+        .iter()
+        .filter(|s| s.font_weight.is_bold())
+        .count();
+    let first_row_bold_ratio = first_row_bold_count as f32 / first_row_spans.len() as f32;
+
+    let data_bold_count = data_row_spans
+        .iter()
+        .filter(|s| s.font_weight.is_bold())
+        .count();
+    let data_bold_ratio = data_bold_count as f32 / data_row_spans.len() as f32;
+
+    // If first row is mostly bold (>50%) and data rows are mostly not bold (<30%)
+    if first_row_bold_ratio > 0.5 && data_bold_ratio < 0.3 {
+        return Some(0);
+    }
+
+    // Check font size difference
+    let first_row_avg_size: f32 =
+        first_row_spans.iter().map(|s| s.font_size).sum::<f32>() / first_row_spans.len() as f32;
+    let data_avg_size: f32 =
+        data_row_spans.iter().map(|s| s.font_size).sum::<f32>() / data_row_spans.len() as f32;
+
+    // If first row is notably larger (at least 1.5 points bigger)
+    if first_row_avg_size > data_avg_size + 1.5 {
+        return Some(0);
+    }
+
+    // Fallback: assume first row is header (original behavior)
+    Some(0)
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@ The fastest Python PDF library for text extraction, image extraction, and markdo
 [![Crates.io](https://img.shields.io/crates/v/pdf_oxide.svg)](https://crates.io/crates/pdf_oxide)
 [![PyPI](https://img.shields.io/pypi/v/pdf_oxide.svg)](https://pypi.org/project/pdf_oxide/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/pdf-oxide)](https://pypi.org/project/pdf-oxide/)
+[![npm](https://img.shields.io/npm/v/pdf-oxide-wasm)](https://www.npmjs.com/package/pdf-oxide-wasm)
 [![Documentation](https://docs.rs/pdf_oxide/badge.svg)](https://docs.rs/pdf_oxide)
 [![Build Status](https://github.com/yfedoseev/pdf_oxide/workflows/CI/badge.svg)](https://github.com/yfedoseev/pdf_oxide/actions)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](https://opensource.org/licenses)
@@ -126,6 +127,20 @@ doc.authenticate("password")
 text = doc.extract_text(0)
 ```
 
+### Form Fields
+
+```python
+# Extract form fields
+fields = doc.get_form_fields()
+for f in fields:
+    print(f"{f.name} ({f.field_type}) = {f.value}")
+
+# Fill and save
+doc.set_form_field_value("employee_name", "Jane Doe")
+doc.set_form_field_value("wages", "85000.00")
+doc.save("filled.pdf")
+```
+
 ## Rust API
 
 ```rust
@@ -150,6 +165,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Form Fields (Rust)
+
+```rust
+use pdf_oxide::editor::{DocumentEditor, EditableDocument, SaveOptions};
+use pdf_oxide::editor::form_fields::FormFieldValue;
+
+let mut editor = DocumentEditor::open("w2.pdf")?;
+editor.set_form_field_value("employee_name", FormFieldValue::Text("Jane Doe".into()))?;
+editor.save_with_options("filled.pdf", SaveOptions::incremental())?;
+```
+
 ## Installation
 
 ### Python
@@ -165,6 +191,16 @@ Wheels available for Linux, macOS, and Windows. Python 3.8–3.14.
 ```toml
 [dependencies]
 pdf_oxide = "0.3"
+```
+
+### JavaScript/WASM
+
+```bash
+npm install pdf-oxide-wasm
+```
+
+```javascript
+const { WasmPdfDocument } = require("pdf-oxide-wasm");
 ```
 
 ## Building from Source
@@ -186,6 +222,7 @@ maturin develop
 
 - **[Getting Started (Rust)](docs/getting-started-rust.md)** - Complete Rust guide
 - **[Getting Started (Python)](docs/getting-started-python.md)** - Complete Python guide
+- **[Getting Started (WASM)](docs/getting-started-wasm.md)** - Browser and Node.js guide
 - **[API Docs](https://docs.rs/pdf_oxide)** - Full Rust API reference
 - **[Full Documentation](https://pdf.oxide.fyi)** - Complete documentation site
 - **[Performance Benchmarks](https://pdf.oxide.fyi/docs/performance)** - Full benchmark methodology and results
@@ -224,4 +261,4 @@ cargo build && cargo test && cargo fmt && cargo clippy -- -D warnings
 
 ---
 
-**Rust** + **Python** | MIT/Apache-2.0 | 100% pass rate on 3,830 PDFs | 0.8ms mean | 5× faster than PyMuPDF | v0.3.9
+**Rust** + **Python** + **WASM** | MIT/Apache-2.0 | 100% pass rate on 3,830 PDFs | 0.8ms mean | 5× faster than PyMuPDF | v0.3.10

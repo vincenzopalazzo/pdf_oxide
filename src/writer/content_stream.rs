@@ -1671,4 +1671,995 @@ mod tests {
         assert!(builder.pending_images().is_empty());
         assert!(builder.take_pending_images().is_empty());
     }
+
+    // ========== Additional Coverage Tests ==========
+
+    #[test]
+    fn test_save_restore_state() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.save_state().restore_state();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("q\n"));
+        assert!(content.contains("Q\n"));
+    }
+
+    #[test]
+    fn test_transform_matrix() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.transform(1.0, 0.0, 0.0, 1.0, 100.0, 200.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("1 0 0 1 100 200 cm"));
+    }
+
+    #[test]
+    fn test_translate() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.translate(50.0, 75.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("1 0 0 1 50 75 cm"));
+    }
+
+    #[test]
+    fn test_scale() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.scale(2.0, 3.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("2 0 0 3 0 0 cm"));
+    }
+
+    #[test]
+    fn test_rotate() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.rotate(std::f32::consts::PI / 2.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("cm"));
+    }
+
+    #[test]
+    fn test_rotate_degrees() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.rotate_degrees(90.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("cm"));
+    }
+
+    #[test]
+    fn test_fill_color() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.fill_color(Color {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+        });
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("1 0 0 rg"));
+    }
+
+    #[test]
+    fn test_stroke_color() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.stroke_color(Color {
+            r: 0.0,
+            g: 1.0,
+            b: 0.0,
+        });
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("0 1 0 RG"));
+    }
+
+    #[test]
+    fn test_set_fill_color_rgb() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.set_fill_color(0.5, 0.6, 0.7);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("0.5 0.6 0.7 rg"));
+    }
+
+    #[test]
+    fn test_set_stroke_color_rgb() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.set_stroke_color(0.1, 0.2, 0.3);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("0.1 0.2 0.3 RG"));
+    }
+
+    #[test]
+    fn test_set_line_width() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.set_line_width(2.5);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("2.5 w"));
+    }
+
+    #[test]
+    fn test_move_to_and_line_to() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.move_to(10.0, 20.0).line_to(30.0, 40.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("10 20 m"));
+        assert!(content.contains("30 40 l"));
+    }
+
+    #[test]
+    fn test_close_path() {
+        let mut builder = ContentStreamBuilder::new();
+        builder
+            .move_to(0.0, 0.0)
+            .line_to(100.0, 0.0)
+            .line_to(100.0, 100.0)
+            .close_path();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("h\n"));
+    }
+
+    #[test]
+    fn test_fill() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.rect(0.0, 0.0, 100.0, 100.0).fill();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("re\n"));
+        assert!(content.contains("f\n"));
+    }
+
+    #[test]
+    fn test_fill_stroke() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.rect(0.0, 0.0, 100.0, 100.0).fill_stroke();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("B\n"));
+    }
+
+    #[test]
+    fn test_fill_even_odd() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.rect(0.0, 0.0, 100.0, 100.0).fill_even_odd();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("f*\n"));
+    }
+
+    #[test]
+    fn test_fill_stroke_even_odd() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.rect(0.0, 0.0, 100.0, 100.0).fill_stroke_even_odd();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("B*\n"));
+    }
+
+    #[test]
+    fn test_close_fill_stroke() {
+        let mut builder = ContentStreamBuilder::new();
+        builder
+            .move_to(0.0, 0.0)
+            .line_to(100.0, 0.0)
+            .close_fill_stroke();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("b\n"));
+    }
+
+    #[test]
+    fn test_clip() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.rect(10.0, 10.0, 200.0, 200.0).clip().end_path();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("W\n"));
+        assert!(content.contains("n\n"));
+    }
+
+    #[test]
+    fn test_clip_even_odd() {
+        let mut builder = ContentStreamBuilder::new();
+        builder
+            .rect(10.0, 10.0, 200.0, 200.0)
+            .clip_even_odd()
+            .end_path();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("W*\n"));
+    }
+
+    #[test]
+    fn test_clip_rect() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.clip_rect(10.0, 10.0, 200.0, 200.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("10 10 200 200 re"));
+        assert!(content.contains("W\n"));
+        assert!(content.contains("n\n"));
+    }
+
+    #[test]
+    fn test_end_path() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.rect(0.0, 0.0, 100.0, 100.0).end_path();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("n\n"));
+    }
+
+    #[test]
+    fn test_set_ext_gstate() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.set_ext_gstate("GS0");
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("/GS0 gs"));
+    }
+
+    #[test]
+    fn test_curve_to() {
+        let mut builder = ContentStreamBuilder::new();
+        builder
+            .move_to(0.0, 0.0)
+            .curve_to(10.0, 20.0, 30.0, 40.0, 50.0, 60.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("10 20 30 40 50 60 c"));
+    }
+
+    #[test]
+    fn test_curve_to_v() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.move_to(0.0, 0.0).curve_to_v(10.0, 20.0, 30.0, 40.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("10 20 30 40 v"));
+    }
+
+    #[test]
+    fn test_curve_to_y() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.move_to(0.0, 0.0).curve_to_y(10.0, 20.0, 30.0, 40.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("10 20 30 40 y"));
+    }
+
+    #[test]
+    fn test_circle() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.circle(100.0, 100.0, 50.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        // Circle uses move_to and curve_to
+        assert!(content.contains("m\n"));
+        assert!(content.contains("c\n"));
+        assert!(content.contains("h\n")); // close_path
+    }
+
+    #[test]
+    fn test_ellipse() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.ellipse(200.0, 200.0, 80.0, 40.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("m\n"));
+        assert!(content.contains("c\n"));
+        assert!(content.contains("h\n"));
+    }
+
+    #[test]
+    fn test_rounded_rect() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.rounded_rect(50.0, 50.0, 200.0, 100.0, 10.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        // Should contain move, line, and curve operations
+        assert!(content.contains("m\n"));
+        assert!(content.contains("l\n"));
+        assert!(content.contains("c\n"));
+        assert!(content.contains("h\n"));
+    }
+
+    #[test]
+    fn test_rounded_rect_large_radius() {
+        let mut builder = ContentStreamBuilder::new();
+        // Radius larger than half width -- should be clamped
+        builder.rounded_rect(0.0, 0.0, 20.0, 40.0, 50.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("m\n"));
+    }
+
+    #[test]
+    fn test_set_line_cap() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.set_line_cap(LineCap::Round);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("1 J"));
+    }
+
+    #[test]
+    fn test_set_line_cap_square() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.set_line_cap(LineCap::Square);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("2 J"));
+    }
+
+    #[test]
+    fn test_set_line_join() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.set_line_join(LineJoin::Round);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("1 j"));
+    }
+
+    #[test]
+    fn test_set_line_join_bevel() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.set_line_join(LineJoin::Bevel);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("2 j"));
+    }
+
+    #[test]
+    fn test_set_miter_limit() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.set_miter_limit(10.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("10 M"));
+    }
+
+    #[test]
+    fn test_set_dash_pattern() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.set_dash_pattern(vec![3.0, 2.0], 0.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("[3 2] 0 d"));
+    }
+
+    #[test]
+    fn test_set_solid_line() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.set_solid_line();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("[] 0 d"));
+    }
+
+    #[test]
+    fn test_set_fill_color_space() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.set_fill_color_space("DeviceRGB");
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("/DeviceRGB cs"));
+    }
+
+    #[test]
+    fn test_set_stroke_color_space() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.set_stroke_color_space("DeviceCMYK");
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("/DeviceCMYK CS"));
+    }
+
+    #[test]
+    fn test_set_fill_color_n() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.set_fill_color_n(vec![0.1, 0.2, 0.3]);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("0.1 0.2 0.3 scn"));
+    }
+
+    #[test]
+    fn test_set_stroke_color_n() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.set_stroke_color_n(vec![0.4, 0.5]);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("0.4 0.5 SCN"));
+    }
+
+    #[test]
+    fn test_set_fill_color_cmyk() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.set_fill_color_cmyk(0.0, 1.0, 1.0, 0.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("0 1 1 0 k"));
+    }
+
+    #[test]
+    fn test_set_stroke_color_cmyk() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.set_stroke_color_cmyk(1.0, 0.0, 0.0, 0.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("1 0 0 0 K"));
+    }
+
+    #[test]
+    fn test_set_fill_pattern() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.set_fill_pattern("P1", vec![]);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("/P1 scn"));
+    }
+
+    #[test]
+    fn test_set_stroke_pattern() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.set_stroke_pattern("P2", vec![0.5]);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("0.5 /P2 SCN"));
+    }
+
+    #[test]
+    fn test_paint_shading() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.paint_shading("Sh1");
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("/Sh1 sh"));
+    }
+
+    #[test]
+    fn test_draw_gradient_rect() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.draw_gradient_rect("Sh0", 10.0, 20.0, 200.0, 100.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("q\n")); // save
+        assert!(content.contains("10 20 200 100 re"));
+        assert!(content.contains("W\n")); // clip
+        assert!(content.contains("n\n")); // end path
+        assert!(content.contains("/Sh0 sh"));
+        assert!(content.contains("Q\n")); // restore
+    }
+
+    #[test]
+    fn test_paint_xobject() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.op(ContentStreamOp::PaintXObject("Img0".to_string()));
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("/Img0 Do"));
+    }
+
+    #[test]
+    fn test_close_stroke() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.op(ContentStreamOp::CloseStroke);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("s\n"));
+    }
+
+    #[test]
+    fn test_close_fill_stroke_even_odd() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.op(ContentStreamOp::CloseFillStrokeEvenOdd);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("b*\n"));
+    }
+
+    #[test]
+    fn test_set_fill_color_gray() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.op(ContentStreamOp::SetFillColorGray(0.5));
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("0.5 g"));
+    }
+
+    #[test]
+    fn test_set_stroke_color_gray() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.op(ContentStreamOp::SetStrokeColorGray(0.75));
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("0.75 G"));
+    }
+
+    #[test]
+    fn test_set_character_spacing() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.op(ContentStreamOp::SetCharacterSpacing(2.0));
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("2 Tc"));
+    }
+
+    #[test]
+    fn test_set_word_spacing() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.op(ContentStreamOp::SetWordSpacing(5.0));
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("5 Tw"));
+    }
+
+    #[test]
+    fn test_set_text_leading() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.op(ContentStreamOp::SetTextLeading(14.0));
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("14 TL"));
+    }
+
+    #[test]
+    fn test_next_line() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.op(ContentStreamOp::NextLine);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("T*"));
+    }
+
+    #[test]
+    fn test_move_text() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.op(ContentStreamOp::MoveText(10.0, -14.0));
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("10 -14 Td"));
+    }
+
+    #[test]
+    fn test_set_text_matrix() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.op(ContentStreamOp::SetTextMatrix(1.0, 0.0, 0.0, 1.0, 72.0, 720.0));
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("1 0 0 1 72 720 Tm"));
+    }
+
+    #[test]
+    fn test_show_hex_text() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.begin_text();
+        builder.op(ContentStreamOp::ShowHexText("<0041004200>".to_string()));
+        builder.end_text();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("<0041004200> Tj"));
+    }
+
+    #[test]
+    fn test_show_text_array() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.begin_text();
+        builder.op(ContentStreamOp::ShowTextArray(vec![
+            TextArrayItem::Text("Hello".to_string()),
+            TextArrayItem::Adjustment(-10.0),
+            TextArrayItem::Text("World".to_string()),
+        ]));
+        builder.end_text();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("[(Hello) -10 (World) ] TJ"));
+    }
+
+    #[test]
+    fn test_show_text_array_with_hex() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.begin_text();
+        builder.op(ContentStreamOp::ShowTextArray(vec![
+            TextArrayItem::HexText("<0041>".to_string()),
+            TextArrayItem::Adjustment(-50.0),
+            TextArrayItem::HexText("<0042>".to_string()),
+        ]));
+        builder.end_text();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("<0041>"));
+        assert!(content.contains("<0042>"));
+        assert!(content.contains("TJ"));
+    }
+
+    #[test]
+    fn test_raw_operator() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.op(ContentStreamOp::Raw("% custom comment".to_string()));
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("% custom comment"));
+    }
+
+    #[test]
+    fn test_draw_image() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.draw_image("Im1", 100.0, 200.0, 300.0, 400.0);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("q\n"));
+        assert!(content.contains("300 0 0 400 100 200 cm"));
+        assert!(content.contains("/Im1 Do"));
+        assert!(content.contains("Q\n"));
+    }
+
+    #[test]
+    fn test_hex_text_method() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.begin_text();
+        builder.set_font("F1", 12.0);
+        builder.hex_text("<00410042>", 72.0, 720.0);
+        builder.end_text();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("<00410042> Tj"));
+    }
+
+    #[test]
+    fn test_begin_text_idempotent() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.begin_text();
+        builder.begin_text(); // Should not add another BT
+        builder.end_text();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        let bt_count = content.matches("BT\n").count();
+        assert_eq!(bt_count, 1);
+    }
+
+    #[test]
+    fn test_end_text_idempotent() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.end_text(); // Not in text -- should be no-op
+        builder.begin_text();
+        builder.end_text();
+        builder.end_text(); // Should be no-op
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        let et_count = content.matches("ET\n").count();
+        assert_eq!(et_count, 1);
+    }
+
+    #[test]
+    fn test_set_font_caching() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.begin_text();
+        builder.set_font("Helvetica", 12.0);
+        builder.set_font("Helvetica", 12.0); // Same font, should not emit again
+        builder.set_font("Helvetica", 14.0); // Different size, should emit
+        builder.end_text();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        // Should have 2 Tf operations (not 3)
+        let tf_count = content.matches("Tf\n").count();
+        assert_eq!(tf_count, 2);
+    }
+
+    #[test]
+    fn test_ops_method() {
+        let mut builder = ContentStreamBuilder::new();
+        builder.ops(vec![
+            ContentStreamOp::SaveState,
+            ContentStreamOp::SetLineWidth(2.0),
+            ContentStreamOp::RestoreState,
+        ]);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("q\n"));
+        assert!(content.contains("2 w\n"));
+        assert!(content.contains("Q\n"));
+    }
+
+    #[test]
+    fn test_add_elements() {
+        let text1 = TextContent {
+            text: "First".to_string(),
+            bbox: Rect::new(72.0, 720.0, 50.0, 12.0),
+            font: FontSpec::new("Helvetica", 12.0),
+            style: TextStyle::default(),
+            reading_order: Some(0),
+            origin: None,
+            rotation_degrees: None,
+            matrix: None,
+        };
+        let text2 = TextContent {
+            text: "Second".to_string(),
+            bbox: Rect::new(72.0, 700.0, 50.0, 12.0),
+            font: FontSpec::new("Helvetica", 12.0),
+            style: TextStyle::default(),
+            reading_order: Some(1),
+            origin: None,
+            rotation_degrees: None,
+            matrix: None,
+        };
+
+        let mut builder = ContentStreamBuilder::new();
+        builder.add_elements(&[ContentElement::Text(text1), ContentElement::Text(text2)]);
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("(First) Tj"));
+        assert!(content.contains("(Second) Tj"));
+    }
+
+    #[test]
+    fn test_escaped_special_chars() {
+        let mut builder = ContentStreamBuilder::new();
+        builder
+            .begin_text()
+            .set_font("Helvetica", 12.0)
+            .text("line1\nline2\rtab\there", 72.0, 720.0)
+            .end_text();
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("\\n"));
+        assert!(content.contains("\\r"));
+        assert!(content.contains("\\t"));
+    }
+
+    #[test]
+    fn test_font_mapping_sans_serif() {
+        let builder = ContentStreamBuilder::new();
+        assert_eq!(builder.map_font_name("sans-serif", false), "Helvetica");
+    }
+
+    #[test]
+    fn test_font_mapping_serif() {
+        let builder = ContentStreamBuilder::new();
+        assert_eq!(builder.map_font_name("serif", false), "Times-Roman");
+        assert_eq!(builder.map_font_name("serif", true), "Times-Roman-Bold");
+    }
+
+    #[test]
+    fn test_font_mapping_monospace() {
+        let builder = ContentStreamBuilder::new();
+        assert_eq!(builder.map_font_name("monospace", false), "Courier");
+        assert_eq!(builder.map_font_name("monospace", true), "Courier-Bold");
+    }
+
+    #[test]
+    fn test_font_mapping_unknown() {
+        let builder = ContentStreamBuilder::new();
+        assert_eq!(builder.map_font_name("Unknown Font", false), "Helvetica");
+        assert_eq!(builder.map_font_name("Unknown Font", true), "Helvetica-Bold");
+    }
+
+    #[test]
+    fn test_blend_mode_names() {
+        assert_eq!(BlendMode::Normal.as_pdf_name(), "Normal");
+        assert_eq!(BlendMode::Multiply.as_pdf_name(), "Multiply");
+        assert_eq!(BlendMode::Screen.as_pdf_name(), "Screen");
+        assert_eq!(BlendMode::Overlay.as_pdf_name(), "Overlay");
+        assert_eq!(BlendMode::Darken.as_pdf_name(), "Darken");
+        assert_eq!(BlendMode::Lighten.as_pdf_name(), "Lighten");
+        assert_eq!(BlendMode::ColorDodge.as_pdf_name(), "ColorDodge");
+        assert_eq!(BlendMode::ColorBurn.as_pdf_name(), "ColorBurn");
+        assert_eq!(BlendMode::HardLight.as_pdf_name(), "HardLight");
+        assert_eq!(BlendMode::SoftLight.as_pdf_name(), "SoftLight");
+        assert_eq!(BlendMode::Difference.as_pdf_name(), "Difference");
+        assert_eq!(BlendMode::Exclusion.as_pdf_name(), "Exclusion");
+    }
+
+    #[test]
+    fn test_blend_mode_default() {
+        let mode = BlendMode::default();
+        assert_eq!(mode.as_pdf_name(), "Normal");
+    }
+
+    #[test]
+    fn test_line_cap_default() {
+        let cap = LineCap::default();
+        assert_eq!(cap as u8, 0);
+    }
+
+    #[test]
+    fn test_line_join_default() {
+        let join = LineJoin::default();
+        assert_eq!(join as u8, 0);
+    }
+
+    #[test]
+    fn test_path_content_stroke_and_fill() {
+        use crate::elements::PathContent;
+
+        let path = PathContent {
+            operations: vec![
+                PathOperation::MoveTo(0.0, 0.0),
+                PathOperation::LineTo(100.0, 0.0),
+                PathOperation::LineTo(100.0, 100.0),
+                PathOperation::ClosePath,
+            ],
+            stroke_color: Some(Color::black()),
+            fill_color: Some(Color {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+            }),
+            stroke_width: 2.0,
+            bbox: Rect::new(0.0, 0.0, 100.0, 100.0),
+            line_cap: Default::default(),
+            line_join: Default::default(),
+            reading_order: None,
+        };
+
+        let mut builder = ContentStreamBuilder::new();
+        builder.add_element(&ContentElement::Path(path));
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("B\n")); // FillStroke
+    }
+
+    #[test]
+    fn test_path_content_stroke_only() {
+        use crate::elements::PathContent;
+
+        let path = PathContent {
+            operations: vec![
+                PathOperation::MoveTo(0.0, 0.0),
+                PathOperation::LineTo(100.0, 100.0),
+            ],
+            stroke_color: Some(Color::black()),
+            fill_color: None,
+            stroke_width: 1.0,
+            bbox: Rect::new(0.0, 0.0, 100.0, 100.0),
+            line_cap: Default::default(),
+            line_join: Default::default(),
+            reading_order: None,
+        };
+
+        let mut builder = ContentStreamBuilder::new();
+        builder.add_element(&ContentElement::Path(path));
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("S\n")); // Stroke only
+    }
+
+    #[test]
+    fn test_path_content_fill_only() {
+        use crate::elements::PathContent;
+
+        let path = PathContent {
+            operations: vec![PathOperation::Rectangle(0.0, 0.0, 100.0, 100.0)],
+            stroke_color: None,
+            fill_color: Some(Color {
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+            }),
+            stroke_width: 0.0,
+            bbox: Rect::new(0.0, 0.0, 100.0, 100.0),
+            line_cap: Default::default(),
+            line_join: Default::default(),
+            reading_order: None,
+        };
+
+        let mut builder = ContentStreamBuilder::new();
+        builder.add_element(&ContentElement::Path(path));
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("f\n")); // Fill only
+    }
+
+    #[test]
+    fn test_path_content_no_stroke_no_fill() {
+        use crate::elements::PathContent;
+
+        let path = PathContent {
+            operations: vec![
+                PathOperation::MoveTo(0.0, 0.0),
+                PathOperation::CurveTo(10.0, 20.0, 30.0, 40.0, 50.0, 60.0),
+            ],
+            stroke_color: None,
+            fill_color: None,
+            stroke_width: 0.0,
+            bbox: Rect::new(0.0, 0.0, 50.0, 60.0),
+            line_cap: Default::default(),
+            line_join: Default::default(),
+            reading_order: None,
+        };
+
+        let mut builder = ContentStreamBuilder::new();
+        builder.add_element(&ContentElement::Path(path));
+
+        let bytes = builder.build().unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(content.contains("n\n")); // EndPath
+    }
+
+    #[test]
+    fn test_empty_build() {
+        let builder = ContentStreamBuilder::new();
+        let bytes = builder.build().unwrap();
+        assert!(bytes.is_empty());
+    }
 }

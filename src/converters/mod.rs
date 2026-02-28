@@ -250,6 +250,15 @@ pub struct ConversionOptions {
     /// Required for coordinate conversion when render_formulas = true.
     /// Defaults to A4 (595.276 x 841.89) if not specified.
     pub page_dimensions: Option<(f32, f32)>,
+
+    /// Include form field values inline in output.
+    ///
+    /// When true (default), form field values (text fields, checkboxes, choice fields)
+    /// are converted to TextSpans at their spatial positions and merged with page content.
+    /// This makes field values appear where they visually belong on the page.
+    ///
+    /// When false, form field values are omitted from output.
+    pub include_form_fields: bool,
 }
 
 impl Default for ConversionOptions {
@@ -268,6 +277,7 @@ impl Default for ConversionOptions {
     /// - render_formulas: false
     /// - page_images: None
     /// - page_dimensions: None (defaults to A4 when needed)
+    /// - include_form_fields: true
     fn default() -> Self {
         Self {
             preserve_layout: false,
@@ -282,6 +292,7 @@ impl Default for ConversionOptions {
             render_formulas: false,
             page_images: None,
             page_dimensions: None,
+            include_form_fields: true,
         }
     }
 }

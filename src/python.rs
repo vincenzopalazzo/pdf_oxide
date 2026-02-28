@@ -51,6 +51,18 @@ pub struct PyPdfDocument {
     editor: Option<RustDocumentEditor>,
 }
 
+impl PyPdfDocument {
+    /// Ensure the editor is initialized, creating it from the path if needed.
+    fn ensure_editor(&mut self) -> PyResult<()> {
+        if self.editor.is_none() {
+            let editor = RustDocumentEditor::open(&self.path)
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to open editor: {}", e)))?;
+            self.editor = Some(editor);
+        }
+        Ok(())
+    }
+}
+
 #[pymethods]
 impl PyPdfDocument {
     /// Open a PDF file.
@@ -322,7 +334,7 @@ impl PyPdfDocument {
     ///     >>> markdown = doc.to_markdown(0, detect_headings=True)
     ///     >>> with open("output.md", "w") as f:
     ///     ...     f.write(markdown)
-    #[pyo3(signature = (page, preserve_layout=false, detect_headings=true, include_images=true, image_output_dir=None, embed_images=true))]
+    #[pyo3(signature = (page, preserve_layout=false, detect_headings=true, include_images=true, image_output_dir=None, embed_images=true, include_form_fields=true))]
     fn to_markdown(
         &mut self,
         page: usize,
@@ -331,6 +343,7 @@ impl PyPdfDocument {
         include_images: bool,
         image_output_dir: Option<String>,
         embed_images: bool,
+        include_form_fields: bool,
     ) -> PyResult<String> {
         let options = RustConversionOptions {
             preserve_layout,
@@ -339,6 +352,7 @@ impl PyPdfDocument {
             include_images,
             image_output_dir,
             embed_images,
+            include_form_fields,
             ..Default::default()
         };
 
@@ -367,7 +381,7 @@ impl PyPdfDocument {
     ///     >>> html = doc.to_html(0, preserve_layout=False)
     ///     >>> with open("output.html", "w") as f:
     ///     ...     f.write(html)
-    #[pyo3(signature = (page, preserve_layout=false, detect_headings=true, include_images=true, image_output_dir=None, embed_images=true))]
+    #[pyo3(signature = (page, preserve_layout=false, detect_headings=true, include_images=true, image_output_dir=None, embed_images=true, include_form_fields=true))]
     fn to_html(
         &mut self,
         page: usize,
@@ -376,6 +390,7 @@ impl PyPdfDocument {
         include_images: bool,
         image_output_dir: Option<String>,
         embed_images: bool,
+        include_form_fields: bool,
     ) -> PyResult<String> {
         let options = RustConversionOptions {
             preserve_layout,
@@ -384,6 +399,7 @@ impl PyPdfDocument {
             include_images,
             image_output_dir,
             embed_images,
+            include_form_fields,
             ..Default::default()
         };
 
@@ -411,7 +427,7 @@ impl PyPdfDocument {
     ///     >>> markdown = doc.to_markdown_all(detect_headings=True)
     ///     >>> with open("book.md", "w") as f:
     ///     ...     f.write(markdown)
-    #[pyo3(signature = (preserve_layout=false, detect_headings=true, include_images=true, image_output_dir=None, embed_images=true))]
+    #[pyo3(signature = (preserve_layout=false, detect_headings=true, include_images=true, image_output_dir=None, embed_images=true, include_form_fields=true))]
     fn to_markdown_all(
         &mut self,
         preserve_layout: bool,
@@ -419,6 +435,7 @@ impl PyPdfDocument {
         include_images: bool,
         image_output_dir: Option<String>,
         embed_images: bool,
+        include_form_fields: bool,
     ) -> PyResult<String> {
         let options = RustConversionOptions {
             preserve_layout,
@@ -427,6 +444,7 @@ impl PyPdfDocument {
             include_images,
             image_output_dir,
             embed_images,
+            include_form_fields,
             ..Default::default()
         };
 
@@ -454,7 +472,7 @@ impl PyPdfDocument {
     ///     >>> html = doc.to_html_all(preserve_layout=True)
     ///     >>> with open("book.html", "w") as f:
     ///     ...     f.write(html)
-    #[pyo3(signature = (preserve_layout=false, detect_headings=true, include_images=true, image_output_dir=None, embed_images=true))]
+    #[pyo3(signature = (preserve_layout=false, detect_headings=true, include_images=true, image_output_dir=None, embed_images=true, include_form_fields=true))]
     fn to_html_all(
         &mut self,
         preserve_layout: bool,
@@ -462,6 +480,7 @@ impl PyPdfDocument {
         include_images: bool,
         image_output_dir: Option<String>,
         embed_images: bool,
+        include_form_fields: bool,
     ) -> PyResult<String> {
         let options = RustConversionOptions {
             preserve_layout,
@@ -470,6 +489,7 @@ impl PyPdfDocument {
             include_images,
             image_output_dir,
             embed_images,
+            include_form_fields,
             ..Default::default()
         };
 
@@ -1509,12 +1529,830 @@ impl PyPdfDocument {
         Ok(py_list.into())
     }
 
+    // ========================================================================
+    // Structured Extraction: Images, Spans, Paths
+    // ========================================================================
+
+    /// Extract image metadata from a page.
+    ///
+    /// Returns metadata for each image on the page (width, height, color space, etc.).
+    /// Does NOT return raw image bytes — use `extract_images_to_files()` for that.
+    ///
+    /// Args:
+    ///     page (int): Page index (0-based)
+    ///
+    /// Returns:
+    ///     list[dict]: List of image metadata dictionaries with keys:
+    ///         - width (int): Image width in pixels
+    ///         - height (int): Image height in pixels
+    ///         - color_space (str): Color space (e.g., "DeviceRGB", "DeviceGray")
+    ///         - bits_per_component (int): Bits per color component
+    ///         - bbox (tuple | None): Bounding box as (x, y, width, height), or None
+    ///
+    /// Raises:
+    ///     RuntimeError: If image extraction fails
+    ///
+    /// Example:
+    ///     >>> doc = PdfDocument("sample.pdf")
+    ///     >>> images = doc.extract_images(0)
+    ///     >>> for img in images:
+    ///     ...     print(f"{img['width']}x{img['height']} {img['color_space']}")
+    fn extract_images(&mut self, py: Python<'_>, page: usize) -> PyResult<Py<PyAny>> {
+        let images = self
+            .inner
+            .extract_images(page)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract images: {}", e)))?;
+
+        let py_list = pyo3::types::PyList::empty(py);
+        for img in &images {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("width", img.width())?;
+            dict.set_item("height", img.height())?;
+            dict.set_item("color_space", format!("{:?}", img.color_space()))?;
+            dict.set_item("bits_per_component", img.bits_per_component())?;
+            if let Some(bbox) = img.bbox() {
+                dict.set_item("bbox", (bbox.x, bbox.y, bbox.width, bbox.height))?;
+            } else {
+                dict.set_item("bbox", py.None())?;
+            }
+            py_list.append(dict)?;
+        }
+        Ok(py_list.into())
+    }
+
+    /// Extract text spans from a page.
+    ///
+    /// Spans are groups of characters that share the same font and style.
+    /// This is the recommended method for structured text extraction.
+    ///
+    /// Args:
+    ///     page (int): Page index (0-based)
+    ///
+    /// Returns:
+    ///     list[TextSpan]: List of text spans with position and style info
+    ///
+    /// Raises:
+    ///     RuntimeError: If span extraction fails
+    ///
+    /// Example:
+    ///     >>> doc = PdfDocument("sample.pdf")
+    ///     >>> spans = doc.extract_spans(0)
+    ///     >>> for span in spans:
+    ///     ...     print(f"'{span.text}' font={span.font_name} size={span.font_size}")
+    fn extract_spans(&mut self, page: usize) -> PyResult<Vec<PyTextSpan>> {
+        self.inner
+            .extract_spans(page)
+            .map(|spans| spans.into_iter().map(|s| PyTextSpan { inner: s }).collect())
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract spans: {}", e)))
+    }
+
+    /// Get the document outline (bookmarks / table of contents).
+    ///
+    /// Returns:
+    ///     list[dict] | None: Outline tree as nested dicts, or None if no outline.
+    ///         Each dict has keys:
+    ///         - title (str): Bookmark title
+    ///         - page (int | None): Target page index (0-based), or None
+    ///         - children (list[dict]): Child bookmarks (same structure)
+    ///
+    /// Raises:
+    ///     RuntimeError: If outline extraction fails
+    ///
+    /// Example:
+    ///     >>> doc = PdfDocument("book.pdf")
+    ///     >>> outline = doc.get_outline()
+    ///     >>> if outline:
+    ///     ...     for item in outline:
+    ///     ...         print(f"{item['title']} -> page {item['page']}")
+    fn get_outline(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let outline = self
+            .inner
+            .get_outline()
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to get outline: {}", e)))?;
+
+        match outline {
+            None => Ok(None),
+            Some(items) => {
+                let result = outline_items_to_py(py, &items)?;
+                Ok(Some(result))
+            },
+        }
+    }
+
+    /// Get annotations from a page.
+    ///
+    /// Returns annotation metadata including type, position, content, and form field info.
+    ///
+    /// Args:
+    ///     page (int): Page index (0-based)
+    ///
+    /// Returns:
+    ///     list[dict]: List of annotation dictionaries. Keys vary by type but may include:
+    ///         - subtype (str): Annotation type (e.g., "Text", "Link", "Highlight")
+    ///         - rect (tuple | None): Bounding rectangle as (x1, y1, x2, y2)
+    ///         - contents (str | None): Text contents
+    ///         - author (str | None): Author name
+    ///         - creation_date (str | None): Creation date
+    ///         - modification_date (str | None): Modification date
+    ///         - subject (str | None): Subject
+    ///         - color (tuple | None): Color as (r, g, b) tuple
+    ///         - opacity (float | None): Opacity (0.0 to 1.0)
+    ///         - field_type (str | None): Form field type if widget annotation
+    ///         - field_name (str | None): Form field name
+    ///         - field_value (str | None): Form field value
+    ///         - action_uri (str | None): URI if link annotation
+    ///
+    /// Raises:
+    ///     RuntimeError: If annotation extraction fails
+    ///
+    /// Example:
+    ///     >>> doc = PdfDocument("annotated.pdf")
+    ///     >>> annotations = doc.get_annotations(0)
+    ///     >>> for ann in annotations:
+    ///     ...     print(f"{ann['subtype']}: {ann.get('contents', '')}")
+    fn get_annotations(&mut self, py: Python<'_>, page: usize) -> PyResult<Py<PyAny>> {
+        let annotations = self
+            .inner
+            .get_annotations(page)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to get annotations: {}", e)))?;
+
+        let py_list = pyo3::types::PyList::empty(py);
+        for ann in &annotations {
+            let dict = pyo3::types::PyDict::new(py);
+
+            if let Some(ref subtype) = ann.subtype {
+                dict.set_item("subtype", subtype)?;
+            }
+            if let Some(ref contents) = ann.contents {
+                dict.set_item("contents", contents)?;
+            }
+            if let Some(rect) = ann.rect {
+                dict.set_item("rect", (rect[0], rect[1], rect[2], rect[3]))?;
+            }
+            if let Some(ref author) = ann.author {
+                dict.set_item("author", author)?;
+            }
+            if let Some(ref date) = ann.creation_date {
+                dict.set_item("creation_date", date)?;
+            }
+            if let Some(ref date) = ann.modification_date {
+                dict.set_item("modification_date", date)?;
+            }
+            if let Some(ref subject) = ann.subject {
+                dict.set_item("subject", subject)?;
+            }
+            if let Some(ref color) = ann.color {
+                if color.len() >= 3 {
+                    dict.set_item("color", (color[0], color[1], color[2]))?;
+                }
+            }
+            if let Some(opacity) = ann.opacity {
+                dict.set_item("opacity", opacity)?;
+            }
+            if let Some(ref ft) = ann.field_type {
+                dict.set_item("field_type", format!("{:?}", ft))?;
+            }
+            if let Some(ref name) = ann.field_name {
+                dict.set_item("field_name", name)?;
+            }
+            if let Some(ref val) = ann.field_value {
+                dict.set_item("field_value", val)?;
+            }
+            // Extract URI from link action
+            if let Some(crate::annotations::LinkAction::Uri(ref uri)) = ann.action {
+                dict.set_item("action_uri", uri)?;
+            }
+
+            py_list.append(dict)?;
+        }
+        Ok(py_list.into())
+    }
+
+    /// Extract vector paths (lines, curves, shapes) from a page.
+    ///
+    /// Args:
+    ///     page (int): Page index (0-based)
+    ///
+    /// Returns:
+    ///     list[dict]: List of path dictionaries with keys:
+    ///         - bbox (tuple): Bounding box as (x, y, width, height)
+    ///         - stroke_width (float): Stroke line width
+    ///         - stroke_color (tuple | None): Stroke color as (r, g, b), or None
+    ///         - fill_color (tuple | None): Fill color as (r, g, b), or None
+    ///         - line_cap (str): Line cap style ("butt", "round", "square")
+    ///         - line_join (str): Line join style ("miter", "round", "bevel")
+    ///         - operations_count (int): Number of path operations
+    ///
+    /// Raises:
+    ///     RuntimeError: If path extraction fails
+    ///
+    /// Example:
+    ///     >>> doc = PdfDocument("vector.pdf")
+    ///     >>> paths = doc.extract_paths(0)
+    ///     >>> for p in paths:
+    ///     ...     print(f"Path at {p['bbox']}, stroke={p['stroke_color']}")
+    fn extract_paths(&mut self, py: Python<'_>, page: usize) -> PyResult<Py<PyAny>> {
+        let paths = self
+            .inner
+            .extract_paths(page)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract paths: {}", e)))?;
+
+        let py_list = pyo3::types::PyList::empty(py);
+        for path in &paths {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("bbox", (path.bbox.x, path.bbox.y, path.bbox.width, path.bbox.height))?;
+            dict.set_item("stroke_width", path.stroke_width)?;
+
+            if let Some(ref color) = path.stroke_color {
+                dict.set_item("stroke_color", (color.r, color.g, color.b))?;
+            } else {
+                dict.set_item("stroke_color", py.None())?;
+            }
+
+            if let Some(ref color) = path.fill_color {
+                dict.set_item("fill_color", (color.r, color.g, color.b))?;
+            } else {
+                dict.set_item("fill_color", py.None())?;
+            }
+
+            let cap_str = match path.line_cap {
+                crate::elements::LineCap::Butt => "butt",
+                crate::elements::LineCap::Round => "round",
+                crate::elements::LineCap::Square => "square",
+            };
+            dict.set_item("line_cap", cap_str)?;
+
+            let join_str = match path.line_join {
+                crate::elements::LineJoin::Miter => "miter",
+                crate::elements::LineJoin::Round => "round",
+                crate::elements::LineJoin::Bevel => "bevel",
+            };
+            dict.set_item("line_join", join_str)?;
+
+            dict.set_item("operations_count", path.operations.len())?;
+
+            py_list.append(dict)?;
+        }
+        Ok(py_list.into())
+    }
+
+    // ========================================================================
+    // OCR Text Extraction (feature-gated)
+    // ========================================================================
+
+    /// Extract text from a page using OCR (optical character recognition).
+    ///
+    /// Falls back to native text extraction when the page has digital text.
+    /// Requires the `ocr` feature to be enabled at build time.
+    ///
+    /// Args:
+    ///     page (int): Page index (0-based)
+    ///     engine (OcrEngine | None): OCR engine instance. Required for scanned pages.
+    ///
+    /// Returns:
+    ///     str: Extracted text from the page
+    ///
+    /// Raises:
+    ///     RuntimeError: If text extraction fails
+    ///
+    /// Example:
+    ///     >>> engine = OcrEngine("det.onnx", "rec.onnx", "dict.txt")
+    ///     >>> text = doc.extract_text_ocr(0, engine)
+    #[cfg(feature = "ocr")]
+    #[pyo3(signature = (page, engine=None))]
+    fn extract_text_ocr(&mut self, page: usize, engine: Option<&PyOcrEngine>) -> PyResult<String> {
+        let ocr_engine = engine.map(|e| &e.inner);
+        let options = crate::ocr::OcrExtractOptions::default();
+        self.inner
+            .extract_text_with_ocr(page, ocr_engine, options)
+            .map_err(|e| PyRuntimeError::new_err(format!("OCR extraction failed: {}", e)))
+    }
+
+    // ========================================================================
+    // Form Fields (AcroForm)
+    // ========================================================================
+
+    /// Get all form fields from the document.
+    ///
+    /// Extracts AcroForm fields including text inputs, checkboxes, radio buttons,
+    /// dropdowns, and signature fields. Works with tax forms, insurance documents,
+    /// government forms, and any PDF with interactive fields.
+    ///
+    /// Returns:
+    ///     list[FormField]: List of form fields with names, types, values, and metadata
+    ///
+    /// Raises:
+    ///     RuntimeError: If form extraction fails
+    ///
+    /// Example:
+    ///     >>> doc = PdfDocument("w2_form.pdf")
+    ///     >>> fields = doc.get_form_fields()
+    ///     >>> for f in fields:
+    ///     ...     print(f"{f.name}: {f.value}")
+    fn get_form_fields(&mut self) -> PyResult<Vec<PyFormField>> {
+        use crate::extractors::forms::FormExtractor;
+
+        let fields = FormExtractor::extract_fields(&mut self.inner).map_err(|e| {
+            PyRuntimeError::new_err(format!("Failed to extract form fields: {}", e))
+        })?;
+
+        Ok(fields
+            .into_iter()
+            .map(|f| PyFormField { inner: f })
+            .collect())
+    }
+
+    /// Get the value of a specific form field by name.
+    ///
+    /// Args:
+    ///     name (str): Full qualified field name (e.g., "topmostSubform[0].Page1[0].f1_01[0]")
+    ///
+    /// Returns:
+    ///     str | bool | list | None: The field value, or None if not found
+    ///
+    /// Raises:
+    ///     RuntimeError: If field lookup fails
+    ///
+    /// Example:
+    ///     >>> val = doc.get_form_field_value("employee_name")
+    ///     >>> print(val)  # "John Doe"
+    fn get_form_field_value(&mut self, name: &str, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.ensure_editor()?;
+        let editor = self.editor.as_mut().unwrap();
+
+        let value = editor
+            .get_form_field_value(name)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to get field value: {}", e)))?;
+
+        match value {
+            Some(v) => form_field_value_to_python(&v, py),
+            None => Ok(py.None()),
+        }
+    }
+
+    /// Set the value of a form field.
+    ///
+    /// Args:
+    ///     name (str): Full qualified field name
+    ///     value (str | bool): New value for the field
+    ///
+    /// Raises:
+    ///     RuntimeError: If the field is not found or value cannot be set
+    ///
+    /// Example:
+    ///     >>> doc.set_form_field_value("employee_name", "Jane Doe")
+    ///     >>> doc.save("filled_form.pdf")
+    fn set_form_field_value(&mut self, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.ensure_editor()?;
+        let editor = self.editor.as_mut().unwrap();
+
+        let field_value = python_to_form_field_value(value)?;
+
+        editor
+            .set_form_field_value(name, field_value)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to set field value: {}", e)))
+    }
+
+    /// Check if the document contains an XFA form.
+    ///
+    /// XFA (XML Forms Architecture) is used by some PDF generators (e.g., Adobe LiveCycle).
+    /// IRS W-2 and many government forms are hybrid AcroForm + XFA.
+    ///
+    /// Returns:
+    ///     bool: True if the document has XFA form data
+    ///
+    /// Example:
+    ///     >>> if doc.has_xfa():
+    ///     ...     print("Document has XFA form data")
+    fn has_xfa(&mut self) -> PyResult<bool> {
+        use crate::xfa::XfaExtractor;
+
+        XfaExtractor::has_xfa(&mut self.inner)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to check XFA: {}", e)))
+    }
+
+    /// Export form data to FDF or XFDF format.
+    ///
+    /// Args:
+    ///     path (str): Output file path
+    ///     format (str): Export format, "fdf" or "xfdf" (default: "fdf")
+    ///
+    /// Raises:
+    ///     RuntimeError: If export fails
+    ///
+    /// Example:
+    ///     >>> doc.export_form_data("form_data.fdf")
+    ///     >>> doc.export_form_data("form_data.xfdf", format="xfdf")
+    #[pyo3(signature = (path, format="fdf"))]
+    fn export_form_data(&mut self, path: &str, format: &str) -> PyResult<()> {
+        self.ensure_editor()?;
+        let editor = self.editor.as_mut().unwrap();
+
+        match format {
+            "fdf" => editor
+                .export_form_data_fdf(path)
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to export FDF: {}", e))),
+            "xfdf" => editor
+                .export_form_data_xfdf(path)
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to export XFDF: {}", e))),
+            _ => Err(PyRuntimeError::new_err(format!(
+                "Unknown format '{}'. Use 'fdf' or 'xfdf'.",
+                format
+            ))),
+        }
+    }
+
+    // ========================================================================
+    // Image Bytes Extraction
+    // ========================================================================
+
+    /// Extract image bytes from a page as PNG data.
+    ///
+    /// Returns actual image pixel data (as PNG), unlike extract_images() which
+    /// returns only metadata.
+    ///
+    /// Args:
+    ///     page (int): Page index (0-based)
+    ///
+    /// Returns:
+    ///     list[dict]: List of dicts with keys: width (int), height (int),
+    ///         data (bytes, PNG-encoded), format (str, always "png")
+    ///
+    /// Raises:
+    ///     RuntimeError: If extraction or conversion fails
+    fn extract_image_bytes(&mut self, py: Python<'_>, page: usize) -> PyResult<Py<PyAny>> {
+        let images = self
+            .inner
+            .extract_images(page)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to extract images: {}", e)))?;
+
+        let py_list = pyo3::types::PyList::empty(py);
+        for img in &images {
+            let png_data = img.to_png_bytes().map_err(|e| {
+                PyRuntimeError::new_err(format!("Failed to convert image to PNG: {}", e))
+            })?;
+
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("width", img.width())?;
+            dict.set_item("height", img.height())?;
+            dict.set_item("format", "png")?;
+            dict.set_item("data", pyo3::types::PyBytes::new(py, &png_data))?;
+            py_list.append(dict)?;
+        }
+        Ok(py_list.into())
+    }
+
+    // ========================================================================
+    // Form Flattening
+    // ========================================================================
+
+    /// Flatten all form fields into page content.
+    ///
+    /// After flattening, form field values become static text and are no longer editable.
+    ///
+    /// Raises:
+    ///     RuntimeError: If flattening fails
+    fn flatten_forms(&mut self) -> PyResult<()> {
+        self.ensure_editor()?;
+        if let Some(ref mut editor) = self.editor {
+            editor
+                .flatten_forms()
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to flatten forms: {}", e)))
+        } else {
+            Err(PyRuntimeError::new_err("No document loaded"))
+        }
+    }
+
+    /// Flatten form fields on a specific page.
+    ///
+    /// Args:
+    ///     page (int): Page index (0-based)
+    ///
+    /// Raises:
+    ///     RuntimeError: If flattening fails
+    fn flatten_forms_on_page(&mut self, page: usize) -> PyResult<()> {
+        self.ensure_editor()?;
+        if let Some(ref mut editor) = self.editor {
+            editor.flatten_forms_on_page(page).map_err(|e| {
+                PyRuntimeError::new_err(format!("Failed to flatten forms on page: {}", e))
+            })
+        } else {
+            Err(PyRuntimeError::new_err("No document loaded"))
+        }
+    }
+
+    // ========================================================================
+    // PDF Merging
+    // ========================================================================
+
+    /// Merge another PDF into this document.
+    ///
+    /// Accepts either a file path (str) or raw PDF bytes.
+    ///
+    /// Args:
+    ///     source: File path (str) or PDF bytes
+    ///
+    /// Returns:
+    ///     int: Number of pages merged
+    ///
+    /// Raises:
+    ///     RuntimeError: If merge fails
+    fn merge_from(&mut self, source: &Bound<'_, PyAny>) -> PyResult<usize> {
+        self.ensure_editor()?;
+        let editor = self.editor.as_mut().unwrap();
+
+        if let Ok(path) = source.extract::<String>() {
+            editor
+                .merge_from(&path)
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to merge PDF: {}", e)))
+        } else if let Ok(data) = source.extract::<Vec<u8>>() {
+            editor
+                .merge_from_bytes(&data)
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to merge PDF: {}", e)))
+        } else {
+            Err(PyRuntimeError::new_err("source must be a file path (str) or PDF bytes"))
+        }
+    }
+
+    // ========================================================================
+    // File Embedding
+    // ========================================================================
+
+    /// Embed a file into the PDF document.
+    ///
+    /// Args:
+    ///     name (str): Display name for the embedded file
+    ///     data (bytes): File contents
+    ///
+    /// Raises:
+    ///     RuntimeError: If embedding fails
+    fn embed_file(&mut self, name: &str, data: &[u8]) -> PyResult<()> {
+        self.ensure_editor()?;
+        if let Some(ref mut editor) = self.editor {
+            editor
+                .embed_file(name, data.to_vec())
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to embed file: {}", e)))
+        } else {
+            Err(PyRuntimeError::new_err("No document loaded"))
+        }
+    }
+
+    // ========================================================================
+    // Page Labels
+    // ========================================================================
+
+    /// Get page label ranges from the document.
+    ///
+    /// Returns:
+    ///     list[dict]: List of dicts with keys: start_page (int), style (str),
+    ///         prefix (str | None), start_value (int)
+    ///
+    /// Raises:
+    ///     RuntimeError: If extraction fails
+    fn page_labels(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        use crate::extractors::page_labels::PageLabelExtractor;
+
+        let labels = PageLabelExtractor::extract(&mut self.inner)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to get page labels: {}", e)))?;
+
+        let py_list = pyo3::types::PyList::empty(py);
+        for label in &labels {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("start_page", label.start_page)?;
+            dict.set_item("style", format!("{:?}", label.style))?;
+            match &label.prefix {
+                Some(p) => dict.set_item("prefix", p)?,
+                None => dict.set_item("prefix", py.None())?,
+            };
+            dict.set_item("start_value", label.start_value)?;
+            py_list.append(dict)?;
+        }
+        Ok(py_list.into())
+    }
+
+    // ========================================================================
+    // XMP Metadata
+    // ========================================================================
+
+    /// Get XMP metadata from the document.
+    ///
+    /// Returns:
+    ///     dict | None: Dict with XMP fields (dc_title, dc_creator, etc.) or None
+    ///
+    /// Raises:
+    ///     RuntimeError: If extraction fails
+    fn xmp_metadata(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        use crate::extractors::xmp::XmpExtractor;
+
+        let metadata = XmpExtractor::extract(&mut self.inner)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to get XMP metadata: {}", e)))?;
+
+        match metadata {
+            None => Ok(py.None()),
+            Some(xmp) => {
+                let dict = pyo3::types::PyDict::new(py);
+                if let Some(ref title) = xmp.dc_title {
+                    dict.set_item("dc_title", title)?;
+                }
+                if !xmp.dc_creator.is_empty() {
+                    dict.set_item("dc_creator", &xmp.dc_creator)?;
+                }
+                if let Some(ref desc) = xmp.dc_description {
+                    dict.set_item("dc_description", desc)?;
+                }
+                if !xmp.dc_subject.is_empty() {
+                    dict.set_item("dc_subject", &xmp.dc_subject)?;
+                }
+                if let Some(ref lang) = xmp.dc_language {
+                    dict.set_item("dc_language", lang)?;
+                }
+                if let Some(ref tool) = xmp.xmp_creator_tool {
+                    dict.set_item("xmp_creator_tool", tool)?;
+                }
+                if let Some(ref date) = xmp.xmp_create_date {
+                    dict.set_item("xmp_create_date", date)?;
+                }
+                if let Some(ref date) = xmp.xmp_modify_date {
+                    dict.set_item("xmp_modify_date", date)?;
+                }
+                if let Some(ref producer) = xmp.pdf_producer {
+                    dict.set_item("pdf_producer", producer)?;
+                }
+                if let Some(ref keywords) = xmp.pdf_keywords {
+                    dict.set_item("pdf_keywords", keywords)?;
+                }
+                Ok(dict.into())
+            },
+        }
+    }
+
     /// String representation of the document.
     ///
     /// Returns:
     ///     str: Representation showing PDF version
     fn __repr__(&self) -> String {
         format!("PdfDocument(version={}.{})", self.inner.version().0, self.inner.version().1)
+    }
+}
+
+// === Form Field Type ===
+
+use crate::extractors::forms::{
+    field_flags, FieldType as RustFieldType, FieldValue as RustFieldValue,
+    FormField as RustFormField,
+};
+
+/// A form field extracted from a PDF AcroForm.
+///
+/// Represents interactive fields like text inputs, checkboxes, radio buttons,
+/// dropdowns, and signature fields found in PDF forms.
+///
+/// Properties:
+///     name (str): Full qualified field name
+///     field_type (str): Field type ("text", "button", "choice", "signature", or "unknown")
+///     value (str | bool | list | None): Field value
+///     tooltip (str | None): Tooltip/description text
+///     bounds (tuple | None): Bounding box as (x1, y1, x2, y2) or None
+///     flags (int | None): Raw field flags bitmask
+///     max_length (int | None): Maximum length for text fields
+///     is_readonly (bool): Whether the field is read-only
+///     is_required (bool): Whether the field is required
+///
+/// Example:
+///     >>> fields = doc.get_form_fields()
+///     >>> for f in fields:
+///     ...     print(f"{f.name} ({f.field_type}): {f.value}")
+#[pyclass(name = "FormField", unsendable)]
+pub struct PyFormField {
+    inner: RustFormField,
+}
+
+#[pymethods]
+impl PyFormField {
+    /// Full qualified field name (e.g., "topmostSubform[0].Page1[0].f1_01[0]").
+    #[getter]
+    #[allow(clippy::misnamed_getters)]
+    fn name(&self) -> &str {
+        &self.inner.full_name
+    }
+
+    /// Field type as a string: "text", "button", "choice", "signature", or "unknown".
+    #[getter]
+    fn field_type(&self) -> &str {
+        match &self.inner.field_type {
+            RustFieldType::Text => "text",
+            RustFieldType::Button => "button",
+            RustFieldType::Choice => "choice",
+            RustFieldType::Signature => "signature",
+            RustFieldType::Unknown(_) => "unknown",
+        }
+    }
+
+    /// Field value: str for text/name, bool for checkbox, list for multi-select, None if empty.
+    #[getter]
+    fn value(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        field_value_to_python(&self.inner.value, py)
+    }
+
+    /// Tooltip or description text, if set.
+    #[getter]
+    fn tooltip(&self) -> Option<&str> {
+        self.inner.tooltip.as_deref()
+    }
+
+    /// Bounding box as (x1, y1, x2, y2), or None if not available.
+    #[getter]
+    fn bounds(&self) -> Option<(f64, f64, f64, f64)> {
+        self.inner.bounds.map(|b| (b[0], b[1], b[2], b[3]))
+    }
+
+    /// Raw field flags bitmask (see PDF spec Table 221).
+    #[getter]
+    fn flags(&self) -> Option<u32> {
+        self.inner.flags
+    }
+
+    /// Maximum text length for text fields, or None.
+    #[getter]
+    fn max_length(&self) -> Option<u32> {
+        self.inner.max_length
+    }
+
+    /// Whether this field is read-only.
+    #[getter]
+    fn is_readonly(&self) -> bool {
+        self.inner
+            .flags
+            .is_some_and(|f| f & field_flags::READ_ONLY != 0)
+    }
+
+    /// Whether this field is required.
+    #[getter]
+    fn is_required(&self) -> bool {
+        self.inner
+            .flags
+            .is_some_and(|f| f & field_flags::REQUIRED != 0)
+    }
+
+    fn __repr__(&self) -> String {
+        let val_str = match &self.inner.value {
+            RustFieldValue::Text(s) => format!("\"{}\"", s),
+            RustFieldValue::Boolean(b) => format!("{}", b),
+            RustFieldValue::Name(s) => format!("\"{}\"", s),
+            RustFieldValue::Array(v) => format!("{:?}", v),
+            RustFieldValue::None => "None".to_string(),
+        };
+        format!(
+            "FormField(name=\"{}\", type=\"{}\", value={})",
+            self.inner.full_name,
+            self.field_type(),
+            val_str
+        )
+    }
+}
+
+/// Convert an extractor FieldValue to a Python object.
+fn field_value_to_python(value: &RustFieldValue, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    match value {
+        RustFieldValue::Text(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
+        RustFieldValue::Name(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
+        RustFieldValue::Boolean(b) => Ok(b.into_pyobject(py)?.to_owned().into_any().unbind()),
+        RustFieldValue::Array(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        RustFieldValue::None => Ok(py.None()),
+    }
+}
+
+/// Convert an editor FormFieldValue to a Python object.
+fn form_field_value_to_python(
+    value: &crate::editor::form_fields::FormFieldValue,
+    py: Python<'_>,
+) -> PyResult<Py<PyAny>> {
+    use crate::editor::form_fields::FormFieldValue;
+    match value {
+        FormFieldValue::Text(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
+        FormFieldValue::Choice(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
+        FormFieldValue::Boolean(b) => Ok(b.into_pyobject(py)?.to_owned().into_any().unbind()),
+        FormFieldValue::MultiChoice(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        FormFieldValue::None => Ok(py.None()),
+    }
+}
+
+/// Convert a Python value to a FormFieldValue.
+fn python_to_form_field_value(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<crate::editor::form_fields::FormFieldValue> {
+    use crate::editor::form_fields::FormFieldValue;
+
+    if let Ok(b) = value.extract::<bool>() {
+        Ok(FormFieldValue::Boolean(b))
+    } else if let Ok(s) = value.extract::<String>() {
+        Ok(FormFieldValue::Text(s))
+    } else if let Ok(v) = value.extract::<Vec<String>>() {
+        Ok(FormFieldValue::MultiChoice(v))
+    } else if value.is_none() {
+        Ok(FormFieldValue::None)
+    } else {
+        Err(PyRuntimeError::new_err("Value must be str, bool, list[str], or None"))
     }
 }
 
@@ -1673,6 +2511,71 @@ impl PyPdf {
     ///     True
     fn to_bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Create a PDF from an image file.
+    ///
+    /// Args:
+    ///     path (str): Path to the image file (PNG, JPEG)
+    ///
+    /// Returns:
+    ///     Pdf: Created PDF document with image as a page
+    ///
+    /// Raises:
+    ///     RuntimeError: If image loading or PDF creation fails
+    #[staticmethod]
+    fn from_image(path: &str) -> PyResult<Self> {
+        use crate::api::Pdf;
+        let pdf = Pdf::from_image(path).map_err(|e| {
+            PyRuntimeError::new_err(format!("Failed to create PDF from image: {}", e))
+        })?;
+        Ok(PyPdf {
+            bytes: pdf.into_bytes(),
+        })
+    }
+
+    /// Create a multi-page PDF from multiple image files.
+    ///
+    /// Each image becomes a separate page.
+    ///
+    /// Args:
+    ///     paths (list[str]): List of paths to image files
+    ///
+    /// Returns:
+    ///     Pdf: Created PDF document
+    ///
+    /// Raises:
+    ///     RuntimeError: If image loading or PDF creation fails
+    #[staticmethod]
+    fn from_images(paths: Vec<String>) -> PyResult<Self> {
+        use crate::api::Pdf;
+        let pdf = Pdf::from_images(&paths).map_err(|e| {
+            PyRuntimeError::new_err(format!("Failed to create PDF from images: {}", e))
+        })?;
+        Ok(PyPdf {
+            bytes: pdf.into_bytes(),
+        })
+    }
+
+    /// Create a PDF from image bytes.
+    ///
+    /// Args:
+    ///     data (bytes): Raw image data (PNG or JPEG)
+    ///
+    /// Returns:
+    ///     Pdf: Created PDF document
+    ///
+    /// Raises:
+    ///     RuntimeError: If image loading or PDF creation fails
+    #[staticmethod]
+    fn from_image_bytes(data: &[u8]) -> PyResult<Self> {
+        use crate::api::Pdf;
+        let pdf = Pdf::from_image_bytes(data).map_err(|e| {
+            PyRuntimeError::new_err(format!("Failed to create PDF from image bytes: {}", e))
+        })?;
+        Ok(PyPdf {
+            bytes: pdf.into_bytes(),
+        })
     }
 
     /// Get the size of the PDF in bytes.
@@ -2631,6 +3534,247 @@ impl PyTextChar {
     }
 }
 
+// === Text Span Type ===
+
+/// A text span with position and style information.
+///
+/// Spans are groups of characters that share the same font and style.
+/// Use `PdfDocument.extract_spans()` to get a list of these.
+///
+/// # Attributes
+///
+/// - `text` (str): The text content
+/// - `bbox` (tuple): Bounding box as (x, y, width, height)
+/// - `font_name` (str): Font family name
+/// - `font_size` (float): Font size in points
+/// - `is_bold` (bool): Whether the text is bold
+/// - `is_italic` (bool): Whether the text is italic
+/// - `color` (tuple): RGB color as (r, g, b) with values 0.0-1.0
+#[pyclass(name = "TextSpan")]
+#[derive(Clone)]
+pub struct PyTextSpan {
+    inner: crate::layout::TextSpan,
+}
+
+#[pymethods]
+impl PyTextSpan {
+    /// The text content of the span.
+    #[getter]
+    fn text(&self) -> &str {
+        &self.inner.text
+    }
+
+    /// Bounding box as (x, y, width, height).
+    #[getter]
+    fn bbox(&self) -> (f32, f32, f32, f32) {
+        (
+            self.inner.bbox.x,
+            self.inner.bbox.y,
+            self.inner.bbox.width,
+            self.inner.bbox.height,
+        )
+    }
+
+    /// Font name/family.
+    #[getter]
+    fn font_name(&self) -> &str {
+        &self.inner.font_name
+    }
+
+    /// Font size in points.
+    #[getter]
+    fn font_size(&self) -> f32 {
+        self.inner.font_size
+    }
+
+    /// Whether the text is bold (font weight >= 700).
+    #[getter]
+    fn is_bold(&self) -> bool {
+        self.inner.font_weight as u16 >= 700
+    }
+
+    /// Whether the text is italic.
+    #[getter]
+    fn is_italic(&self) -> bool {
+        self.inner.is_italic
+    }
+
+    /// Text color as (r, g, b) with values 0.0-1.0.
+    #[getter]
+    fn color(&self) -> (f32, f32, f32) {
+        (self.inner.color.r, self.inner.color.g, self.inner.color.b)
+    }
+
+    fn __repr__(&self) -> String {
+        let preview = if self.inner.text.len() > 30 {
+            format!("{}...", &self.inner.text[..30])
+        } else {
+            self.inner.text.clone()
+        };
+        format!(
+            "TextSpan({:?}, font={}, size={:.1})",
+            preview, self.inner.font_name, self.inner.font_size
+        )
+    }
+}
+
+// === Outline Helper ===
+
+/// Convert OutlineItem tree to Python nested dicts.
+fn outline_items_to_py(
+    py: Python<'_>,
+    items: &[crate::outline::OutlineItem],
+) -> PyResult<Py<PyAny>> {
+    let py_list = pyo3::types::PyList::empty(py);
+    for item in items {
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("title", &item.title)?;
+
+        match &item.dest {
+            Some(crate::outline::Destination::PageIndex(idx)) => {
+                dict.set_item("page", *idx)?;
+            },
+            Some(crate::outline::Destination::Named(name)) => {
+                dict.set_item("page", py.None())?;
+                dict.set_item("dest_name", name)?;
+            },
+            None => {
+                dict.set_item("page", py.None())?;
+            },
+        }
+
+        let children = outline_items_to_py(py, &item.children)?;
+        dict.set_item("children", children)?;
+
+        py_list.append(dict)?;
+    }
+    Ok(py_list.into())
+}
+
+// === OCR Types (feature-gated) ===
+
+/// OCR engine for extracting text from scanned PDF pages.
+///
+/// Requires the `ocr` feature to be enabled at build time.
+///
+/// Example:
+///     >>> engine = OcrEngine("det.onnx", "rec.onnx", "dict.txt")
+///     >>> text = doc.extract_text_ocr(0, engine)
+#[cfg(feature = "ocr")]
+#[pyclass(name = "OcrEngine", unsendable)]
+pub struct PyOcrEngine {
+    inner: crate::ocr::OcrEngine,
+}
+
+#[cfg(feature = "ocr")]
+#[pymethods]
+impl PyOcrEngine {
+    /// Create a new OCR engine.
+    ///
+    /// Args:
+    ///     det_model_path (str): Path to the text detection ONNX model
+    ///     rec_model_path (str): Path to the text recognition ONNX model
+    ///     dict_path (str): Path to the character dictionary file
+    ///     config (OcrConfig | None): Optional OCR configuration
+    ///
+    /// Raises:
+    ///     RuntimeError: If model loading fails
+    ///
+    /// Example:
+    ///     >>> engine = OcrEngine("det.onnx", "rec.onnx", "dict.txt")
+    ///     >>> engine_custom = OcrEngine("det.onnx", "rec.onnx", "dict.txt",
+    ///     ...     OcrConfig(det_threshold=0.5))
+    #[new]
+    #[pyo3(signature = (det_model_path, rec_model_path, dict_path, config=None))]
+    fn new(
+        det_model_path: &str,
+        rec_model_path: &str,
+        dict_path: &str,
+        config: Option<&PyOcrConfig>,
+    ) -> PyResult<Self> {
+        let ocr_config = config.map(|c| c.inner.clone()).unwrap_or_default();
+        let engine =
+            crate::ocr::OcrEngine::new(det_model_path, rec_model_path, dict_path, ocr_config)
+                .map_err(|e| {
+                    PyRuntimeError::new_err(format!("Failed to create OCR engine: {}", e))
+                })?;
+        Ok(PyOcrEngine { inner: engine })
+    }
+
+    fn __repr__(&self) -> String {
+        "OcrEngine(...)".to_string()
+    }
+}
+
+/// Configuration for OCR processing.
+///
+/// All parameters are optional and have sensible defaults.
+///
+/// Example:
+///     >>> config = OcrConfig(det_threshold=0.5, num_threads=8)
+///     >>> engine = OcrEngine("det.onnx", "rec.onnx", "dict.txt", config)
+#[cfg(feature = "ocr")]
+#[pyclass(name = "OcrConfig")]
+#[derive(Clone)]
+pub struct PyOcrConfig {
+    inner: crate::ocr::OcrConfig,
+}
+
+#[cfg(feature = "ocr")]
+#[pymethods]
+impl PyOcrConfig {
+    /// Create OCR configuration with optional parameters.
+    ///
+    /// Args:
+    ///     det_threshold (float): Detection threshold (0.0-1.0, default: 0.3)
+    ///     box_threshold (float): Box threshold (0.0-1.0, default: 0.6)
+    ///     rec_threshold (float): Recognition threshold (0.0-1.0, default: 0.5)
+    ///     num_threads (int): Number of threads (default: 4)
+    ///     max_candidates (int): Max text candidates (default: 1000)
+    ///     use_v5 (bool): Use PP-OCRv5 optimized settings (default: False).
+    ///         When True, uses high-resolution input for detection (up to 4000px)
+    ///         which is required for PP-OCRv5 server models.
+    #[new]
+    #[pyo3(signature = (det_threshold=None, box_threshold=None, rec_threshold=None, num_threads=None, max_candidates=None, use_v5=false))]
+    fn new(
+        det_threshold: Option<f32>,
+        box_threshold: Option<f32>,
+        rec_threshold: Option<f32>,
+        num_threads: Option<usize>,
+        max_candidates: Option<usize>,
+        use_v5: bool,
+    ) -> Self {
+        let mut config = if use_v5 {
+            crate::ocr::OcrConfig::v5()
+        } else {
+            crate::ocr::OcrConfig::default()
+        };
+        if let Some(v) = det_threshold {
+            config.det_threshold = v;
+        }
+        if let Some(v) = box_threshold {
+            config.box_threshold = v;
+        }
+        if let Some(v) = rec_threshold {
+            config.rec_threshold = v;
+        }
+        if let Some(v) = num_threads {
+            config.num_threads = v;
+        }
+        if let Some(v) = max_candidates {
+            config.max_candidates = v;
+        }
+        PyOcrConfig { inner: config }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "OcrConfig(det_threshold={}, rec_threshold={}, threads={})",
+            self.inner.det_threshold, self.inner.rec_threshold, self.inner.num_threads
+        )
+    }
+}
+
 // === Advanced Graphics Types ===
 
 use crate::layout::{Color as RustColor, FontWeight, TextChar as RustTextChar};
@@ -3312,6 +4456,17 @@ fn pdf_oxide(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Text extraction types
     m.add_class::<PyTextChar>()?;
+    m.add_class::<PyTextSpan>()?;
+
+    // Form field types
+    m.add_class::<PyFormField>()?;
+
+    // OCR types (optional, requires ocr feature)
+    #[cfg(feature = "ocr")]
+    {
+        m.add_class::<PyOcrEngine>()?;
+        m.add_class::<PyOcrConfig>()?;
+    }
 
     // Advanced graphics
     m.add_class::<PyColor>()?;

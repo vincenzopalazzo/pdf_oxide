@@ -549,4 +549,231 @@ mod tests_no_feature {
             .to_string()
             .contains("requires the 'barcodes' feature"));
     }
+
+    #[test]
+    fn test_generate_1d_not_enabled() {
+        let result =
+            BarcodeGenerator::generate_1d(BarcodeType::Code128, "test", &BarcodeOptions::new());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires the 'barcodes' feature"));
+    }
+
+    #[test]
+    fn test_generate_qr_not_enabled() {
+        let result = BarcodeGenerator::generate_qr("test", &QrCodeOptions::new());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires the 'barcodes' feature"));
+    }
+
+    #[test]
+    fn test_generate_code128_not_enabled() {
+        let result = BarcodeGenerator::generate_code128("test", 200, 80);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires the 'barcodes' feature"));
+    }
+
+    #[test]
+    fn test_generate_ean13_not_enabled() {
+        let result = BarcodeGenerator::generate_ean13("1234567890128", 200, 80);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires the 'barcodes' feature"));
+    }
+}
+
+/// Tests that don't depend on the barcodes feature (always run)
+#[cfg(test)]
+mod tests_common {
+    use super::*;
+
+    // ---- Tests for BarcodeType Display ----
+
+    #[test]
+    fn test_barcode_type_display_all() {
+        assert_eq!(BarcodeType::Code128.to_string(), "Code 128");
+        assert_eq!(BarcodeType::Code39.to_string(), "Code 39");
+        assert_eq!(BarcodeType::Ean13.to_string(), "EAN-13");
+        assert_eq!(BarcodeType::Ean8.to_string(), "EAN-8");
+        assert_eq!(BarcodeType::UpcA.to_string(), "UPC-A");
+        assert_eq!(BarcodeType::Itf.to_string(), "ITF");
+        assert_eq!(BarcodeType::Code93.to_string(), "Code 93");
+        assert_eq!(BarcodeType::Codabar.to_string(), "Codabar");
+    }
+
+    // ---- Tests for BarcodeType equality ----
+
+    #[test]
+    fn test_barcode_type_equality() {
+        assert_eq!(BarcodeType::Code128, BarcodeType::Code128);
+        assert_ne!(BarcodeType::Code128, BarcodeType::Code39);
+        assert_ne!(BarcodeType::Ean13, BarcodeType::Ean8);
+    }
+
+    #[test]
+    fn test_barcode_type_copy() {
+        let bt = BarcodeType::Code128;
+        let bt2 = bt; // Copy
+        assert_eq!(bt, bt2);
+    }
+
+    // ---- Tests for QrErrorCorrection ----
+
+    #[test]
+    fn test_qr_error_correction_default() {
+        assert_eq!(QrErrorCorrection::default(), QrErrorCorrection::Medium);
+    }
+
+    #[test]
+    fn test_qr_error_correction_equality() {
+        assert_eq!(QrErrorCorrection::Low, QrErrorCorrection::Low);
+        assert_eq!(QrErrorCorrection::Medium, QrErrorCorrection::Medium);
+        assert_eq!(QrErrorCorrection::Quartile, QrErrorCorrection::Quartile);
+        assert_eq!(QrErrorCorrection::High, QrErrorCorrection::High);
+        assert_ne!(QrErrorCorrection::Low, QrErrorCorrection::High);
+    }
+
+    #[test]
+    fn test_qr_error_correction_copy() {
+        let ec = QrErrorCorrection::High;
+        let ec2 = ec;
+        assert_eq!(ec, ec2);
+    }
+
+    // ---- Tests for QrCodeOptions ----
+
+    #[test]
+    fn test_qr_code_options_default() {
+        let opts = QrCodeOptions::default();
+        assert_eq!(opts.size, 200);
+        assert_eq!(opts.error_correction, QrErrorCorrection::Medium);
+        assert_eq!(opts.quiet_zone, 4);
+        assert_eq!(opts.foreground, [0, 0, 0, 255]);
+        assert_eq!(opts.background, [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn test_qr_code_options_new() {
+        let opts = QrCodeOptions::new();
+        assert_eq!(opts.size, 200);
+    }
+
+    #[test]
+    fn test_qr_code_options_size() {
+        let opts = QrCodeOptions::new().size(500);
+        assert_eq!(opts.size, 500);
+    }
+
+    #[test]
+    fn test_qr_code_options_error_correction() {
+        let opts = QrCodeOptions::new().error_correction(QrErrorCorrection::High);
+        assert_eq!(opts.error_correction, QrErrorCorrection::High);
+    }
+
+    #[test]
+    fn test_qr_code_options_quiet_zone() {
+        let opts = QrCodeOptions::new().quiet_zone(8);
+        assert_eq!(opts.quiet_zone, 8);
+    }
+
+    #[test]
+    fn test_qr_code_options_foreground() {
+        let opts = QrCodeOptions::new().foreground(255, 0, 0, 128);
+        assert_eq!(opts.foreground, [255, 0, 0, 128]);
+    }
+
+    #[test]
+    fn test_qr_code_options_background() {
+        let opts = QrCodeOptions::new().background(0, 0, 255, 200);
+        assert_eq!(opts.background, [0, 0, 255, 200]);
+    }
+
+    #[test]
+    fn test_qr_code_options_chaining() {
+        let opts = QrCodeOptions::new()
+            .size(300)
+            .error_correction(QrErrorCorrection::Low)
+            .quiet_zone(2)
+            .foreground(128, 128, 128, 255)
+            .background(200, 200, 200, 255);
+        assert_eq!(opts.size, 300);
+        assert_eq!(opts.error_correction, QrErrorCorrection::Low);
+        assert_eq!(opts.quiet_zone, 2);
+        assert_eq!(opts.foreground, [128, 128, 128, 255]);
+        assert_eq!(opts.background, [200, 200, 200, 255]);
+    }
+
+    // ---- Tests for BarcodeOptions ----
+
+    #[test]
+    fn test_barcode_options_default() {
+        let opts = BarcodeOptions::default();
+        assert_eq!(opts.width, 200);
+        assert_eq!(opts.height, 80);
+        assert_eq!(opts.foreground, [0, 0, 0, 255]);
+        assert_eq!(opts.background, [255, 255, 255, 255]);
+        assert!(!opts.show_text);
+    }
+
+    #[test]
+    fn test_barcode_options_new() {
+        let opts = BarcodeOptions::new();
+        assert_eq!(opts.width, 200);
+        assert_eq!(opts.height, 80);
+    }
+
+    #[test]
+    fn test_barcode_options_width() {
+        let opts = BarcodeOptions::new().width(400);
+        assert_eq!(opts.width, 400);
+    }
+
+    #[test]
+    fn test_barcode_options_height() {
+        let opts = BarcodeOptions::new().height(120);
+        assert_eq!(opts.height, 120);
+    }
+
+    #[test]
+    fn test_barcode_options_foreground() {
+        let opts = BarcodeOptions::new().foreground(0, 0, 128, 255);
+        assert_eq!(opts.foreground, [0, 0, 128, 255]);
+    }
+
+    #[test]
+    fn test_barcode_options_background() {
+        let opts = BarcodeOptions::new().background(255, 255, 0, 255);
+        assert_eq!(opts.background, [255, 255, 0, 255]);
+    }
+
+    #[test]
+    fn test_barcode_options_show_text() {
+        let opts = BarcodeOptions::new().show_text(true);
+        assert!(opts.show_text);
+    }
+
+    #[test]
+    fn test_barcode_options_chaining() {
+        let opts = BarcodeOptions::new()
+            .width(300)
+            .height(100)
+            .foreground(10, 20, 30, 255)
+            .background(240, 250, 255, 255)
+            .show_text(true);
+        assert_eq!(opts.width, 300);
+        assert_eq!(opts.height, 100);
+        assert_eq!(opts.foreground, [10, 20, 30, 255]);
+        assert_eq!(opts.background, [240, 250, 255, 255]);
+        assert!(opts.show_text);
+    }
 }

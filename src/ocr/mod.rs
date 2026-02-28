@@ -46,7 +46,7 @@ mod preprocessor;
 mod recognizer;
 
 // Re-exports
-pub use config::{OcrConfig, OcrConfigBuilder};
+pub use config::{DetResizeStrategy, OcrConfig, OcrConfigBuilder};
 pub use detector::TextDetector;
 pub use engine::{OcrEngine, OcrOutput, OcrSpan};
 pub use error::OcrError;
@@ -54,7 +54,8 @@ pub use postprocessor::DetectedBox;
 pub use preprocessor::{crop_text_region, preprocess_for_detection, preprocess_for_recognition};
 pub use recognizer::{RecognitionResult, TextRecognizer};
 
-// High-level OCR functions are exported at module level (needs_ocr, ocr_page, etc.)
+// High-level OCR functions and types exported at module level:
+// PageType, detect_page_type, needs_ocr, ocr_page, ocr_page_spans, extract_text_with_ocr
 
 use crate::{PdfDocument, Result};
 
@@ -83,25 +84,100 @@ use crate::{PdfDocument, Result};
 ///     println!("Page 0 is scanned, needs OCR");
 /// }
 /// ```
-pub fn needs_ocr(doc: &mut PdfDocument, page: usize) -> Result<bool> {
-    // Check for native text first
-    let native_text = doc.extract_text(page).unwrap_or_default();
-    let has_substantial_text = native_text.trim().len() > 50;
+/// Result of scanned page detection with granular classification.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PageType {
+    /// Page has native text — no OCR needed.
+    NativeText,
+    /// Page is fully scanned (large image, no/minimal text) — OCR the whole page.
+    ScannedPage,
+    /// Page has some native text but also large images that may contain text.
+    /// Hybrid merge should be used: native text + OCR for image regions.
+    HybridPage,
+}
 
-    if has_substantial_text {
-        return Ok(false);
-    }
+/// Detect the type of a PDF page for OCR purposes.
+///
+/// Uses multiple heuristics:
+/// 1. Native text length — substantial text means NativeText
+/// 2. Image coverage — a single image covering >80% of the page area suggests a scan
+/// 3. Text density — very sparse text with large images suggests HybridPage
+/// 4. Replacement characters — high ratio of U+FFFD suggests garbled OCR layer
+///
+/// # Arguments
+///
+/// * `doc` - The PDF document
+/// * `page` - Page number (0-indexed)
+///
+/// # Returns
+///
+/// The detected [`PageType`].
+pub fn detect_page_type(doc: &mut PdfDocument, page: usize) -> Result<PageType> {
+    // IMPORTANT: Use extract_spans() instead of extract_text() to avoid infinite
+    // recursion. extract_text() calls needs_ocr() which calls detect_page_type(),
+    // creating a stack overflow loop when the OCR feature is enabled.
+    let spans = doc.extract_spans(page).unwrap_or_default();
+    let native_text: String = spans
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let trimmed = native_text.trim();
+    let text_len = trimmed.len();
 
-    // Check if page has images (scanned pages typically have a full-page image)
+    // Check for replacement characters (garbled OCR layer)
+    let replacement_count = trimmed.chars().filter(|&c| c == '\u{FFFD}').count();
+    let total_chars = trimmed.chars().count().max(1);
+    let replacement_ratio = replacement_count as f32 / total_chars as f32;
+
+    // If text has >20% replacement characters, it's garbled — treat as scanned
+    let text_is_garbled = replacement_ratio > 0.20 && total_chars > 10;
+
+    // Check for images
     let images = doc.extract_images(page)?;
     if images.is_empty() {
-        return Ok(false);
+        // No images — return native text regardless of quality
+        return Ok(PageType::NativeText);
     }
 
-    // If there's no substantial text but there are images, likely a scanned page
-    // For more accurate detection, we could check if there's a single large image
-    // that covers most of the page, but this simple heuristic works for most cases.
-    Ok(true)
+    // Calculate image coverage: does a single image cover most of the page?
+    // Use standard US Letter page area as baseline (612 × 792 points)
+    let page_area: f32 = 612.0 * 792.0;
+    let largest_image_area = images
+        .iter()
+        .map(|img| (img.width() as f32) * (img.height() as f32))
+        .fold(0.0_f32, f32::max);
+
+    // Scale image area to PDF points (approximate: assume 72 DPI baseline)
+    // Images are in pixels; a full A4 scan at 300 DPI ≈ 2480×3508 pixels
+    // Page in points ≈ 612×792. Ratio: image_pixels / (page_points * dpi/72)
+    let high_coverage = largest_image_area > page_area * 4.0; // ~72 DPI equivalent
+
+    if text_len <= 50 || text_is_garbled {
+        // No substantial (or garbled) text — classify based on images
+        if high_coverage {
+            Ok(PageType::ScannedPage)
+        } else if !images.is_empty() {
+            Ok(PageType::ScannedPage) // Small images but no text still needs OCR
+        } else {
+            Ok(PageType::NativeText)
+        }
+    } else if high_coverage && text_len < 500 {
+        // Some text but a large image covers the page — hybrid
+        Ok(PageType::HybridPage)
+    } else {
+        // Substantial text — native extraction is fine
+        Ok(PageType::NativeText)
+    }
+}
+
+/// Check if a PDF page needs OCR (is a scanned page).
+///
+/// This is a simplified wrapper around [`detect_page_type`] that returns
+/// `true` for both `ScannedPage` and `HybridPage` types.
+pub fn needs_ocr(doc: &mut PdfDocument, page: usize) -> Result<bool> {
+    let page_type = detect_page_type(doc, page)?;
+    Ok(matches!(page_type, PageType::ScannedPage | PageType::HybridPage))
 }
 
 /// OCR text extraction options.
@@ -279,37 +355,75 @@ pub fn extract_text_with_ocr(
     engine: Option<&OcrEngine>,
     options: OcrExtractOptions,
 ) -> Result<String> {
-    // First, check if native text extraction works
-    let native_text = doc.extract_text(page).unwrap_or_default();
+    let page_type = detect_page_type(doc, page)?;
 
-    // If we got substantial text, return it
-    if native_text.trim().len() > 50 {
-        return Ok(native_text);
-    }
-
-    // Check if we have images (potential scanned page)
-    let images = doc.extract_images(page)?;
-    if images.is_empty() {
-        // No images, return whatever native text we got
-        return Ok(native_text);
-    }
-
-    // We have images but no/little text - try OCR if engine is available
-    if let Some(ocr_engine) = engine {
-        match ocr_page(doc, page, ocr_engine, &options) {
-            Ok(ocr_text) => return Ok(ocr_text),
-            Err(e) => {
-                log::warn!("OCR failed for page {}: {}", page, e);
-                if options.fallback_to_native {
-                    return Ok(native_text);
+    match page_type {
+        PageType::NativeText => {
+            // Native text is sufficient
+            doc.extract_text(page)
+        },
+        PageType::ScannedPage => {
+            // Full OCR needed
+            if let Some(ocr_engine) = engine {
+                match ocr_page(doc, page, ocr_engine, &options) {
+                    Ok(ocr_text) => Ok(ocr_text),
+                    Err(e) => {
+                        log::warn!("OCR failed for scanned page {}: {}", page, e);
+                        if options.fallback_to_native {
+                            doc.extract_text(page)
+                        } else {
+                            Err(e)
+                        }
+                    },
                 }
-                return Err(e);
-            },
-        }
-    }
+            } else {
+                // No OCR engine, return whatever native text exists
+                doc.extract_text(page)
+            }
+        },
+        PageType::HybridPage => {
+            // Has some native text and large images — merge both sources
+            let native_text = doc.extract_text(page).unwrap_or_default();
 
-    // No OCR engine, return native text
-    Ok(native_text)
+            if let Some(ocr_engine) = engine {
+                match ocr_page(doc, page, ocr_engine, &options) {
+                    Ok(ocr_text) => {
+                        // Hybrid merge: if OCR produced substantially more text,
+                        // it likely captured content from images that native extraction missed.
+                        // Use the longer result, preferring native when close.
+                        let native_len = native_text.trim().len();
+                        let ocr_len = ocr_text.trim().len();
+
+                        if ocr_len > native_len * 2 {
+                            // OCR found significantly more content — use it
+                            log::debug!(
+                                "Hybrid page {}: OCR ({} chars) >> native ({} chars), using OCR",
+                                page,
+                                ocr_len,
+                                native_len
+                            );
+                            Ok(ocr_text)
+                        } else {
+                            // Native text is comparable or better — prefer it (higher quality)
+                            log::debug!(
+                                "Hybrid page {}: native ({} chars) >= OCR ({} chars), using native",
+                                page,
+                                native_len,
+                                ocr_len
+                            );
+                            Ok(native_text)
+                        }
+                    },
+                    Err(e) => {
+                        log::warn!("OCR failed for hybrid page {}: {}, using native text", page, e);
+                        Ok(native_text)
+                    },
+                }
+            } else {
+                Ok(native_text)
+            }
+        },
+    }
 }
 
 #[cfg(test)]
@@ -318,7 +432,6 @@ mod tests {
 
     #[test]
     fn test_ocr_module_compiles() {
-        // Basic compile test - verify config can be created
         let _ = OcrConfig::default();
     }
 
@@ -333,5 +446,12 @@ mod tests {
     fn test_ocr_extract_options_with_dpi() {
         let options = OcrExtractOptions::with_dpi(200.0);
         assert!((options.scale - 200.0 / 72.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_page_type_enum() {
+        assert_eq!(PageType::NativeText, PageType::NativeText);
+        assert_ne!(PageType::NativeText, PageType::ScannedPage);
+        assert_ne!(PageType::ScannedPage, PageType::HybridPage);
     }
 }

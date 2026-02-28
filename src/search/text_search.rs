@@ -10,7 +10,7 @@ use crate::layout::TextSpan;
 use regex::{Regex, RegexBuilder};
 
 /// A search result with position information.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResult {
     /// Page number (0-indexed) where the match was found
     pub page: usize,
@@ -28,7 +28,7 @@ pub struct SearchResult {
 }
 
 /// Options for text search.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct SearchOptions {
     /// Case insensitive search
     pub case_insensitive: bool,

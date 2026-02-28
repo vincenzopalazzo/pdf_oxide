@@ -727,4 +727,177 @@ mod tests {
         assert_eq!(action.action_type, ActionType::AddedXmpMetadata);
         assert_eq!(action.fixed_error, Some(ErrorCode::MissingXmpMetadata));
     }
+
+    #[test]
+    fn test_conversion_config_remove_encryption() {
+        let config = ConversionConfig::default();
+        assert!(config.remove_encryption);
+        assert!(config.remove_embedded_files);
+        assert!(!config.add_structure);
+        assert!(config.icc_profile.is_none());
+    }
+
+    #[test]
+    fn test_conversion_config_add_structure() {
+        let config = ConversionConfig::new().add_structure(true);
+        assert!(config.add_structure);
+    }
+
+    #[test]
+    fn test_conversion_config_with_icc_profile() {
+        let profile = vec![1, 2, 3, 4];
+        let config = ConversionConfig::new().with_icc_profile(profile.clone());
+        assert_eq!(config.icc_profile.unwrap(), profile);
+    }
+
+    #[test]
+    fn test_converter_with_config() {
+        let config = ConversionConfig::new().embed_fonts(false);
+        let converter = PdfAConverter::new(PdfALevel::A1b).with_config(config);
+        assert_eq!(converter.level(), PdfALevel::A1b);
+    }
+
+    #[test]
+    fn test_converter_levels() {
+        for level in [
+            PdfALevel::A1a,
+            PdfALevel::A1b,
+            PdfALevel::A2a,
+            PdfALevel::A2b,
+            PdfALevel::A2u,
+            PdfALevel::A3a,
+            PdfALevel::A3b,
+            PdfALevel::A3u,
+        ] {
+            let converter = PdfAConverter::new(level);
+            assert_eq!(converter.level(), level);
+        }
+    }
+
+    #[test]
+    fn test_xmp_generation_a1b() {
+        let converter = PdfAConverter::new(PdfALevel::A1b);
+        let xmp = converter.generate_xmp_metadata();
+        assert!(xmp.contains("<pdfaid:part>1</pdfaid:part>"));
+        assert!(xmp.contains("<pdfaid:conformance>B</pdfaid:conformance>"));
+        assert!(xmp.contains("xmpmeta"));
+        assert!(xmp.contains("xpacket"));
+    }
+
+    #[test]
+    fn test_xmp_generation_a3a() {
+        let converter = PdfAConverter::new(PdfALevel::A3a);
+        let xmp = converter.generate_xmp_metadata();
+        assert!(xmp.contains("<pdfaid:part>3</pdfaid:part>"));
+        assert!(xmp.contains("<pdfaid:conformance>A</pdfaid:conformance>"));
+    }
+
+    #[test]
+    fn test_xmp_generation_a2u() {
+        let converter = PdfAConverter::new(PdfALevel::A2u);
+        let xmp = converter.generate_xmp_metadata();
+        assert!(xmp.contains("<pdfaid:part>2</pdfaid:part>"));
+        assert!(xmp.contains("<pdfaid:conformance>U</pdfaid:conformance>"));
+    }
+
+    #[test]
+    fn test_conversion_result_new() {
+        let result = ConversionResult::new(PdfALevel::A2b);
+        assert!(!result.success);
+        assert_eq!(result.level, PdfALevel::A2b);
+        assert!(result.actions.is_empty());
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_conversion_result_add_action() {
+        let mut result = ConversionResult::new(PdfALevel::A1b);
+        result.add_action(ConversionAction::new(ActionType::RemovedJavaScript, "Removed JS"));
+        result
+            .add_action(ConversionAction::new(ActionType::RemovedEncryption, "Removed encryption"));
+        assert_eq!(result.actions.len(), 2);
+    }
+
+    #[test]
+    fn test_conversion_result_add_error() {
+        let mut result = ConversionResult::new(PdfALevel::A1b);
+        result.add_error(ConversionError::new(ErrorCode::FontNotEmbedded, "Cannot embed font"));
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].error_code, ErrorCode::FontNotEmbedded);
+        assert_eq!(result.errors[0].reason, "Cannot embed font");
+    }
+
+    #[test]
+    fn test_conversion_action_debug_clone() {
+        let action = ConversionAction::new(ActionType::AddedLanguage, "Added en");
+        let cloned = action.clone();
+        assert_eq!(cloned.action_type, ActionType::AddedLanguage);
+        let debug = format!("{:?}", action);
+        assert!(debug.contains("AddedLanguage"));
+    }
+
+    #[test]
+    fn test_conversion_error_debug_clone() {
+        let error = ConversionError::new(ErrorCode::EncryptionNotAllowed, "Encrypted");
+        let cloned = error.clone();
+        assert_eq!(cloned.error_code, ErrorCode::EncryptionNotAllowed);
+        let debug = format!("{:?}", error);
+        assert!(debug.contains("EncryptionNotAllowed"));
+    }
+
+    #[test]
+    fn test_all_action_types() {
+        let types = vec![
+            ActionType::AddedXmpMetadata,
+            ActionType::AddedPdfaIdentification,
+            ActionType::EmbeddedFont,
+            ActionType::AddedOutputIntent,
+            ActionType::RemovedJavaScript,
+            ActionType::RemovedEncryption,
+            ActionType::FlattenedTransparency,
+            ActionType::RemovedEmbeddedFiles,
+            ActionType::AddedStructure,
+            ActionType::FixedAnnotation,
+            ActionType::AddedLanguage,
+        ];
+        for t in types {
+            let copy = t;
+            assert_eq!(t, copy);
+            let debug = format!("{:?}", t);
+            assert!(!debug.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_converter_debug_clone() {
+        let converter = PdfAConverter::new(PdfALevel::A2b);
+        let cloned = converter.clone();
+        assert_eq!(cloned.level(), PdfALevel::A2b);
+        let debug = format!("{:?}", converter);
+        assert!(debug.contains("PdfAConverter"));
+    }
+
+    #[test]
+    fn test_srgb_icc_profile() {
+        let profile = PdfAConverter::get_srgb_icc_profile();
+        assert!(!profile.is_empty());
+    }
+
+    #[test]
+    fn test_conversion_config_debug_clone() {
+        let config = ConversionConfig::new().embed_fonts(false);
+        let cloned = config.clone();
+        assert!(!cloned.embed_fonts);
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("ConversionConfig"));
+    }
+
+    #[test]
+    fn test_conversion_result_debug_clone() {
+        let result = ConversionResult::new(PdfALevel::A1a);
+        let cloned = result.clone();
+        assert_eq!(cloned.level, PdfALevel::A1a);
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("ConversionResult"));
+    }
 }

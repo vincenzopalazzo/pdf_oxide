@@ -1315,4 +1315,552 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert!(lines[0].0.is_empty());
     }
+
+    // ========== Additional Coverage Tests ==========
+
+    #[test]
+    fn test_font_manager_default() {
+        let manager = FontManager::default();
+        // Default should be same as new()
+        assert!(manager.get_font("Helvetica").is_some());
+        assert!(manager.get_font("Symbol").is_some());
+        assert!(manager.get_font("ZapfDingbats").is_some());
+    }
+
+    #[test]
+    fn test_all_base14_fonts_registered() {
+        let manager = FontManager::new();
+        let names = manager.font_names();
+        assert!(names.len() >= 14);
+        // Check all 14 base fonts
+        for name in &[
+            "Helvetica",
+            "Helvetica-Bold",
+            "Helvetica-Oblique",
+            "Helvetica-BoldOblique",
+            "Times-Roman",
+            "Times-Bold",
+            "Times-Italic",
+            "Times-BoldItalic",
+            "Courier",
+            "Courier-Bold",
+            "Courier-Oblique",
+            "Courier-BoldOblique",
+            "Symbol",
+            "ZapfDingbats",
+        ] {
+            assert!(manager.get_font(name).is_some(), "Missing font: {}", name);
+            assert!(manager.is_base14(name), "Not base14: {}", name);
+        }
+    }
+
+    #[test]
+    fn test_get_font_or_default_existing() {
+        let manager = FontManager::new();
+        let font = manager.get_font_or_default("Times-Roman");
+        assert_eq!(font.name, "Times-Roman");
+    }
+
+    #[test]
+    fn test_get_font_or_default_fallback() {
+        let manager = FontManager::new();
+        let font = manager.get_font_or_default("NonExistentFont");
+        assert_eq!(font.name, "Helvetica");
+    }
+
+    #[test]
+    fn test_get_font_none() {
+        let manager = FontManager::new();
+        assert!(manager.get_font("FakeFont").is_none());
+    }
+
+    #[test]
+    fn test_next_font_resource_id() {
+        let mut manager = FontManager::new();
+        assert_eq!(manager.next_font_resource_id(), "F1");
+        assert_eq!(manager.next_font_resource_id(), "F2");
+        assert_eq!(manager.next_font_resource_id(), "F3");
+    }
+
+    #[test]
+    fn test_text_width_nonexistent_font_fallback() {
+        let manager = FontManager::new();
+        // Should fall back to Helvetica
+        let width = manager.text_width("Hello", "FakeFont", 12.0);
+        let helvetica_width = manager.text_width("Hello", "Helvetica", 12.0);
+        assert!((width - helvetica_width).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_char_width_nonexistent_font_fallback() {
+        let manager = FontManager::new();
+        let width = manager.char_width('A', "NonExistent", 12.0);
+        let helvetica_width = manager.char_width('A', "Helvetica", 12.0);
+        assert!((width - helvetica_width).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_select_font_all_combinations() {
+        let manager = FontManager::new();
+
+        // All Helvetica
+        assert_eq!(
+            manager.select_font(FontFamily::Helvetica, FontWeight::Normal, false),
+            "Helvetica"
+        );
+        assert_eq!(
+            manager.select_font(FontFamily::Helvetica, FontWeight::Bold, false),
+            "Helvetica-Bold"
+        );
+        assert_eq!(
+            manager.select_font(FontFamily::Helvetica, FontWeight::Normal, true),
+            "Helvetica-Oblique"
+        );
+        assert_eq!(
+            manager.select_font(FontFamily::Helvetica, FontWeight::Bold, true),
+            "Helvetica-BoldOblique"
+        );
+
+        // All Times
+        assert_eq!(
+            manager.select_font(FontFamily::Times, FontWeight::Normal, false),
+            "Times-Roman"
+        );
+        assert_eq!(manager.select_font(FontFamily::Times, FontWeight::Bold, false), "Times-Bold");
+        assert_eq!(
+            manager.select_font(FontFamily::Times, FontWeight::Normal, true),
+            "Times-Italic"
+        );
+        assert_eq!(
+            manager.select_font(FontFamily::Times, FontWeight::Bold, true),
+            "Times-BoldItalic"
+        );
+
+        // All Courier
+        assert_eq!(manager.select_font(FontFamily::Courier, FontWeight::Normal, false), "Courier");
+        assert_eq!(
+            manager.select_font(FontFamily::Courier, FontWeight::Bold, false),
+            "Courier-Bold"
+        );
+        assert_eq!(
+            manager.select_font(FontFamily::Courier, FontWeight::Normal, true),
+            "Courier-Oblique"
+        );
+        assert_eq!(
+            manager.select_font(FontFamily::Courier, FontWeight::Bold, true),
+            "Courier-BoldOblique"
+        );
+
+        // Symbol and ZapfDingbats (weight/italic ignored)
+        assert_eq!(manager.select_font(FontFamily::Symbol, FontWeight::Normal, false), "Symbol");
+        assert_eq!(manager.select_font(FontFamily::Symbol, FontWeight::Bold, true), "Symbol");
+        assert_eq!(
+            manager.select_font(FontFamily::ZapfDingbats, FontWeight::Normal, false),
+            "ZapfDingbats"
+        );
+        assert_eq!(
+            manager.select_font(FontFamily::ZapfDingbats, FontWeight::Bold, true),
+            "ZapfDingbats"
+        );
+    }
+
+    #[test]
+    fn test_font_info_family_properties() {
+        let manager = FontManager::new();
+
+        let helv = manager.get_font("Helvetica").unwrap();
+        assert_eq!(helv.family, FontFamily::Helvetica);
+        assert_eq!(helv.weight, FontWeight::Normal);
+        assert!(!helv.italic);
+        assert!(helv.is_base14);
+
+        let helv_bold = manager.get_font("Helvetica-Bold").unwrap();
+        assert_eq!(helv_bold.weight, FontWeight::Bold);
+        assert!(!helv_bold.italic);
+
+        let helv_obl = manager.get_font("Helvetica-Oblique").unwrap();
+        assert_eq!(helv_obl.weight, FontWeight::Normal);
+        assert!(helv_obl.italic);
+
+        let helv_bo = manager.get_font("Helvetica-BoldOblique").unwrap();
+        assert_eq!(helv_bo.weight, FontWeight::Bold);
+        assert!(helv_bo.italic);
+    }
+
+    #[test]
+    fn test_times_font_properties() {
+        let manager = FontManager::new();
+
+        let tr = manager.get_font("Times-Roman").unwrap();
+        assert_eq!(tr.family, FontFamily::Times);
+        assert_eq!(tr.weight, FontWeight::Normal);
+        assert!(!tr.italic);
+
+        let tb = manager.get_font("Times-Bold").unwrap();
+        assert_eq!(tb.weight, FontWeight::Bold);
+
+        let ti = manager.get_font("Times-Italic").unwrap();
+        assert!(ti.italic);
+
+        let tbi = manager.get_font("Times-BoldItalic").unwrap();
+        assert_eq!(tbi.weight, FontWeight::Bold);
+        assert!(tbi.italic);
+    }
+
+    #[test]
+    fn test_courier_font_properties() {
+        let manager = FontManager::new();
+
+        let c = manager.get_font("Courier").unwrap();
+        assert_eq!(c.family, FontFamily::Courier);
+
+        let cb = manager.get_font("Courier-Bold").unwrap();
+        assert_eq!(cb.weight, FontWeight::Bold);
+
+        let co = manager.get_font("Courier-Oblique").unwrap();
+        assert!(co.italic);
+
+        let cbo = manager.get_font("Courier-BoldOblique").unwrap();
+        assert_eq!(cbo.weight, FontWeight::Bold);
+        assert!(cbo.italic);
+    }
+
+    #[test]
+    fn test_symbol_font_properties() {
+        let manager = FontManager::new();
+
+        let sym = manager.get_font("Symbol").unwrap();
+        assert_eq!(sym.family, FontFamily::Symbol);
+        assert!(sym.is_base14);
+
+        let zd = manager.get_font("ZapfDingbats").unwrap();
+        assert_eq!(zd.family, FontFamily::ZapfDingbats);
+        assert!(zd.is_base14);
+    }
+
+    #[test]
+    fn test_symbol_font_char_width() {
+        let manager = FontManager::new();
+        let sym = manager.get_font("Symbol").unwrap();
+        // Symbol uses fixed 500 width for all chars
+        assert!((sym.char_width('A') - 500.0).abs() < 0.001);
+        assert!((sym.char_width('z') - 500.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_courier_font_metrics() {
+        let manager = FontManager::new();
+        let courier = manager.get_font("Courier").unwrap();
+        assert_eq!(courier.ascender, 629.0);
+        assert_eq!(courier.descender, -157.0);
+
+        let courier_bold = manager.get_font("Courier-Bold").unwrap();
+        assert_eq!(courier_bold.ascender, 626.0);
+    }
+
+    #[test]
+    fn test_helvetica_bold_metrics() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Helvetica-Bold").unwrap();
+        assert_eq!(font.ascender, 718.0);
+        assert_eq!(font.descender, -207.0);
+        assert_eq!(font.x_height, 532.0);
+    }
+
+    #[test]
+    fn test_times_metrics() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Times-Roman").unwrap();
+        assert_eq!(font.ascender, 683.0);
+        assert_eq!(font.descender, -217.0);
+
+        let bold = manager.get_font("Times-Bold").unwrap();
+        assert_eq!(bold.ascender, 676.0);
+    }
+
+    #[test]
+    fn test_font_info_line_spacing_factor() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Helvetica").unwrap();
+        assert!((font.line_spacing_factor() - 1.2).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_font_info_text_width_empty() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Helvetica").unwrap();
+        assert!((font.text_width("", 12.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_font_info_char_width_unknown_char() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Helvetica").unwrap();
+        // Unknown character should return 500 (default)
+        let width = font.char_width('\u{FFFF}');
+        assert!((width - 500.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_font_widths_proportional_known_chars() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Helvetica").unwrap();
+
+        // Space should have a specific width
+        let space_w = font.char_width(' ');
+        assert!((space_w - 278.0).abs() < 0.001);
+
+        // 'A' for Helvetica = 722
+        let a_w = font.char_width('A');
+        assert!((a_w - 722.0).abs() < 0.001);
+
+        // 'a' for Helvetica = 556
+        let a_lower_w = font.char_width('a');
+        assert!((a_lower_w - 556.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_font_widths_times_chars() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Times-Roman").unwrap();
+
+        // Space for Times = 250
+        let space_w = font.char_width(' ');
+        assert!((space_w - 250.0).abs() < 0.001);
+
+        // 'I' for Times = 333
+        let i_w = font.char_width('I');
+        assert!((i_w - 333.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_font_widths_times_bold_chars() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Times-Bold").unwrap();
+
+        // 'W' for Times-Bold = 1000
+        let w_w = font.char_width('W');
+        assert!((w_w - 1000.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_helvetica_bold_widths() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Helvetica-Bold").unwrap();
+
+        // 'f' for Helvetica-Bold = 333 (different from Helvetica=278)
+        let f_w = font.char_width('f');
+        assert!((f_w - 333.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_digit_widths() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Helvetica").unwrap();
+
+        // All digits should be 556 for Helvetica
+        for digit in '0'..='9' {
+            let w = font.char_width(digit);
+            assert!((w - 556.0).abs() < 0.001, "Digit {} has width {}", digit, w);
+        }
+    }
+
+    #[test]
+    fn test_punctuation_widths() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Helvetica").unwrap();
+
+        // Test various punctuation
+        assert!(font.char_width('@') > 700.0); // @ is wide
+        assert!(font.char_width('!') > 200.0);
+        assert!(font.char_width('.') > 200.0);
+    }
+
+    #[test]
+    fn test_text_width_scaling() {
+        let manager = FontManager::new();
+        let w12 = manager.text_width("Hello", "Helvetica", 12.0);
+        let w24 = manager.text_width("Hello", "Helvetica", 24.0);
+        // Width at 24pt should be exactly 2x width at 12pt
+        assert!((w24 - 2.0 * w12).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_line_height_scaling() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Helvetica").unwrap();
+        let lh12 = font.line_height(12.0);
+        let lh24 = font.line_height(24.0);
+        assert!((lh24 - 2.0 * lh12).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_text_layout_default() {
+        let layout = TextLayout::default();
+        let lines = layout.wrap_text("Hello", "Helvetica", 12.0, 1000.0);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].0, "Hello");
+    }
+
+    #[test]
+    fn test_text_layout_with_font_manager() {
+        let fm = FontManager::new();
+        let layout = TextLayout::with_font_manager(fm);
+        let lines = layout.wrap_text("Test", "Helvetica", 12.0, 1000.0);
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn test_text_layout_font_manager_accessor() {
+        let layout = TextLayout::new();
+        let fm = layout.font_manager();
+        assert!(fm.get_font("Helvetica").is_some());
+    }
+
+    #[test]
+    fn test_text_layout_single_long_word() {
+        let layout = TextLayout::new();
+        // A very long word should stay on one line even if wider than max_width
+        let lines = layout.wrap_text("Superlongword", "Helvetica", 12.0, 10.0);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].0, "Superlongword");
+    }
+
+    #[test]
+    fn test_text_layout_wrap_exact_fit() {
+        let layout = TextLayout::new();
+        // Single word on its own line
+        let lines = layout.wrap_text("A B", "Helvetica", 12.0, 1000.0);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].0, "A B");
+    }
+
+    #[test]
+    fn test_text_bounds_multiline() {
+        let layout = TextLayout::new();
+        // Force wrapping by using very narrow width
+        let (width, height) = layout.text_bounds("Hello World", "Helvetica", 12.0, 30.0);
+        assert!(width > 0.0);
+        assert!(height > 0.0);
+    }
+
+    #[test]
+    fn test_text_bounds_empty() {
+        let layout = TextLayout::new();
+        let (_width, height) = layout.text_bounds("", "Helvetica", 12.0, 100.0);
+        // Empty text should still have one line height
+        assert!(height > 0.0);
+    }
+
+    #[test]
+    fn test_font_weight_default() {
+        let weight = FontWeight::default();
+        assert_eq!(weight, FontWeight::Normal);
+    }
+
+    #[test]
+    fn test_embedded_font_manager_new() {
+        let mgr = EmbeddedFontManager::new();
+        assert!(mgr.is_empty());
+        assert_eq!(mgr.len(), 0);
+    }
+
+    #[test]
+    fn test_embedded_font_manager_default() {
+        let mgr = EmbeddedFontManager::default();
+        assert!(mgr.is_empty());
+        assert_eq!(mgr.len(), 0);
+    }
+
+    #[test]
+    fn test_base14_metrics_default_branch() {
+        // Test the default branch of base14_metrics
+        let metrics = base14_metrics("Unknown");
+        assert_eq!(metrics.0, 750.0);
+        assert_eq!(metrics.1, -250.0);
+    }
+
+    #[test]
+    fn test_font_widths_for_base14_symbol() {
+        let widths = FontWidths::for_base14("Symbol");
+        assert!((widths.width_for_char('A') - 500.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_font_widths_for_base14_unknown() {
+        // Falls through to default proportional widths
+        let widths = FontWidths::for_base14("UnknownFont");
+        // Should still have proportional widths with defaults
+        let w = widths.width_for_char('A');
+        assert!(w > 0.0);
+    }
+
+    #[test]
+    fn test_courier_monospace_all_chars_same() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Courier").unwrap();
+        let width_a = font.char_width('A');
+        let width_z = font.char_width('z');
+        let width_at = font.char_width('@');
+        assert!((width_a - 600.0).abs() < 0.001);
+        assert!((width_z - 600.0).abs() < 0.001);
+        assert!((width_at - 600.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_courier_bold_monospace() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Courier-Bold").unwrap();
+        assert!((font.char_width('A') - 600.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_courier_oblique_monospace() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Courier-Oblique").unwrap();
+        assert!((font.char_width('X') - 600.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_courier_boldoblique_monospace() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Courier-BoldOblique").unwrap();
+        assert!((font.char_width('M') - 600.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_helvetica_oblique_widths() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Helvetica-Oblique").unwrap();
+        // Same widths as Helvetica
+        let a_w = font.char_width('A');
+        assert!((a_w - 722.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_times_italic_widths() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Times-Italic").unwrap();
+        // Same widths as Times-Roman
+        let space_w = font.char_width(' ');
+        assert!((space_w - 250.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_times_bolditalic_widths() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Times-BoldItalic").unwrap();
+        // 'a' for Times-BoldItalic = 500
+        let a_w = font.char_width('a');
+        assert!((a_w - 500.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_helvetica_boldoblique_widths() {
+        let manager = FontManager::new();
+        let font = manager.get_font("Helvetica-BoldOblique").unwrap();
+        // Colon for Helvetica-Bold = 333
+        let w = font.char_width(':');
+        assert!((w - 333.0).abs() < 0.001);
+    }
 }

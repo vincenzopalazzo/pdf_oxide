@@ -334,7 +334,10 @@ impl MarkdownConverter {
                 true
             } else if has_non_whitespace && block.text.len() == 1 {
                 // Rule 2: Single non-alphabetic character (e.g., ".", "!", etc.)
-                let ch = block.text.chars().next().unwrap();
+                let ch = match block.text.chars().next() {
+                    Some(c) => c,
+                    None => continue,
+                };
                 !ch.is_alphabetic() && ch != ' ' && ch != '\t' && ch != '\n'
             } else {
                 false

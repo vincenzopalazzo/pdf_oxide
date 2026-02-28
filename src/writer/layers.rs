@@ -536,4 +536,381 @@ mod tests {
     fn test_visibility_policy() {
         assert_eq!(VisibilityPolicy::default(), VisibilityPolicy::AllOn);
     }
+
+    // ---- Tests for Layer defaults ----
+
+    #[test]
+    fn test_layer_default() {
+        let layer = Layer::default();
+        assert_eq!(layer.name, "");
+        assert!(layer.display_name.is_none());
+        assert!(layer.visible);
+        assert!(layer.visible_on_screen);
+        assert!(layer.visible_on_print);
+        assert!(layer.exportable);
+        assert_eq!(layer.intent, LayerIntent::View);
+        assert!(layer.order.is_none());
+    }
+
+    #[test]
+    fn test_layer_new_sets_name_and_display_name() {
+        let layer = Layer::new("MyLayer");
+        assert_eq!(layer.name, "MyLayer");
+        assert_eq!(layer.display_name, Some("MyLayer".to_string()));
+    }
+
+    // ---- Tests for Layer setter methods ----
+
+    #[test]
+    fn test_layer_visible_on_screen() {
+        let mut layer = Layer::new("Test");
+        layer.visible_on_screen(false);
+        assert!(!layer.visible_on_screen);
+    }
+
+    #[test]
+    fn test_layer_exportable() {
+        let mut layer = Layer::new("Test");
+        layer.exportable(false);
+        assert!(!layer.exportable);
+    }
+
+    #[test]
+    fn test_layer_order() {
+        let mut layer = Layer::new("Test");
+        layer.order(5);
+        assert_eq!(layer.order, Some(5));
+    }
+
+    // ---- Tests for build_ocg_dict with different intents ----
+
+    #[test]
+    fn test_layer_ocg_dict_view_intent() {
+        let layer = Layer::new("ViewLayer");
+        let dict = layer.build_ocg_dict();
+        if let Some(Object::Name(intent)) = dict.get("Intent") {
+            assert_eq!(intent, "View");
+        } else {
+            panic!("Expected View intent");
+        }
+    }
+
+    #[test]
+    fn test_layer_ocg_dict_design_intent() {
+        let mut layer = Layer::new("DesignLayer");
+        layer.intent(LayerIntent::Design);
+        let dict = layer.build_ocg_dict();
+        if let Some(Object::Name(intent)) = dict.get("Intent") {
+            assert_eq!(intent, "Design");
+        } else {
+            panic!("Expected Design intent");
+        }
+    }
+
+    #[test]
+    fn test_layer_ocg_dict_both_intent() {
+        let mut layer = Layer::new("BothLayer");
+        layer.intent(LayerIntent::Both);
+        let dict = layer.build_ocg_dict();
+        if let Some(Object::Array(arr)) = dict.get("Intent") {
+            assert_eq!(arr.len(), 2);
+            assert_eq!(arr[0], Object::Name("View".to_string()));
+            assert_eq!(arr[1], Object::Name("Design".to_string()));
+        } else {
+            panic!("Expected Array intent for Both");
+        }
+    }
+
+    #[test]
+    fn test_layer_ocg_dict_uses_display_name() {
+        let mut layer = Layer::new("internal_name");
+        layer.display_name("Displayed Name");
+        let dict = layer.build_ocg_dict();
+        if let Some(Object::String(name_bytes)) = dict.get("Name") {
+            assert_eq!(name_bytes, b"Displayed Name");
+        } else {
+            panic!("Expected String for Name");
+        }
+    }
+
+    #[test]
+    fn test_layer_ocg_dict_falls_back_to_name() {
+        let layer = Layer {
+            name: "fallback_name".to_string(),
+            ..Default::default()
+        };
+        // display_name is None, so build_ocg_dict should use name
+        let dict = layer.build_ocg_dict();
+        if let Some(Object::String(name_bytes)) = dict.get("Name") {
+            assert_eq!(name_bytes, b"fallback_name");
+        } else {
+            panic!("Expected String for Name");
+        }
+    }
+
+    // ---- Tests for build_usage_dict ----
+
+    #[test]
+    fn test_usage_dict_not_visible_on_screen() {
+        let mut layer = Layer::new("Test");
+        layer.visible_on_screen(false);
+        let usage = layer.build_usage_dict().unwrap();
+        assert!(usage.contains_key("View"));
+        if let Some(Object::Dictionary(view_dict)) = usage.get("View") {
+            assert_eq!(view_dict.get("ViewState"), Some(&Object::Name("OFF".to_string())));
+        }
+    }
+
+    #[test]
+    fn test_usage_dict_not_exportable() {
+        let mut layer = Layer::new("Test");
+        layer.exportable(false);
+        let usage = layer.build_usage_dict().unwrap();
+        assert!(usage.contains_key("Export"));
+        if let Some(Object::Dictionary(export_dict)) = usage.get("Export") {
+            assert_eq!(export_dict.get("ExportState"), Some(&Object::Name("OFF".to_string())));
+        }
+    }
+
+    #[test]
+    fn test_usage_dict_multiple_non_defaults() {
+        let mut layer = Layer::new("Test");
+        layer
+            .visible_on_screen(false)
+            .visible_on_print(false)
+            .exportable(false);
+        let usage = layer.build_usage_dict().unwrap();
+        assert!(usage.contains_key("View"));
+        assert!(usage.contains_key("Print"));
+        assert!(usage.contains_key("Export"));
+    }
+
+    // ---- Tests for LayerBuilder ----
+
+    #[test]
+    fn test_layer_builder_empty() {
+        let builder = LayerBuilder::new();
+        assert!(builder.is_empty());
+        assert_eq!(builder.len(), 0);
+        assert!(builder.layers().is_empty());
+    }
+
+    #[test]
+    fn test_layer_builder_application_name() {
+        let builder = LayerBuilder::new().application_name("MyApp");
+        assert_eq!(builder.application_name, Some("MyApp".to_string()));
+    }
+
+    #[test]
+    fn test_layer_builder_layers_mut() {
+        let mut builder = LayerBuilder::new();
+        builder.add_layer("Layer1");
+        builder.layers_mut().push(Layer::new("Layer2"));
+        assert_eq!(builder.len(), 2);
+    }
+
+    // ---- Tests for build_oc_properties ----
+
+    #[test]
+    fn test_build_oc_properties_basic() {
+        let mut builder = LayerBuilder::new();
+        builder.add_layer("Visible").visible(true);
+        builder.add_layer("Hidden").visible(false);
+
+        let refs = vec![ObjectRef::new(10, 0), ObjectRef::new(11, 0)];
+        let props = builder.build_oc_properties(&refs);
+
+        assert!(props.contains_key("OCGs"));
+        assert!(props.contains_key("D"));
+
+        if let Some(Object::Array(ocgs)) = props.get("OCGs") {
+            assert_eq!(ocgs.len(), 2);
+        }
+
+        if let Some(Object::Dictionary(d_dict)) = props.get("D") {
+            assert!(d_dict.contains_key("Name"));
+            assert!(d_dict.contains_key("BaseState"));
+            assert!(d_dict.contains_key("Order"));
+
+            // Visible layer should be in ON array
+            if let Some(Object::Array(on_arr)) = d_dict.get("ON") {
+                assert_eq!(on_arr.len(), 1);
+            }
+            // Hidden layer should be in OFF array
+            if let Some(Object::Array(off_arr)) = d_dict.get("OFF") {
+                assert_eq!(off_arr.len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_oc_properties_with_creator() {
+        let mut builder = LayerBuilder::new().creator("pdf_oxide_test");
+        builder.add_layer("Layer1");
+
+        let refs = vec![ObjectRef::new(1, 0)];
+        let props = builder.build_oc_properties(&refs);
+
+        if let Some(Object::Dictionary(d_dict)) = props.get("D") {
+            if let Some(Object::String(creator_bytes)) = d_dict.get("Creator") {
+                assert_eq!(creator_bytes, b"pdf_oxide_test");
+            } else {
+                panic!("Expected Creator string");
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_oc_properties_off_base_state() {
+        let mut builder = LayerBuilder::new().base_state(LayerVisibility::Off);
+        builder.add_layer("Layer1");
+
+        let refs = vec![ObjectRef::new(1, 0)];
+        let props = builder.build_oc_properties(&refs);
+
+        if let Some(Object::Dictionary(d_dict)) = props.get("D") {
+            assert_eq!(d_dict.get("BaseState"), Some(&Object::Name("OFF".to_string())));
+        }
+    }
+
+    #[test]
+    fn test_build_oc_properties_all_visible() {
+        let mut builder = LayerBuilder::new();
+        builder.add_layer("Layer1").visible(true);
+        builder.add_layer("Layer2").visible(true);
+
+        let refs = vec![ObjectRef::new(1, 0), ObjectRef::new(2, 0)];
+        let props = builder.build_oc_properties(&refs);
+
+        if let Some(Object::Dictionary(d_dict)) = props.get("D") {
+            // All visible = all in ON, no OFF
+            if let Some(Object::Array(on_arr)) = d_dict.get("ON") {
+                assert_eq!(on_arr.len(), 2);
+            }
+            assert!(!d_dict.contains_key("OFF"));
+        }
+    }
+
+    #[test]
+    fn test_build_oc_properties_all_hidden() {
+        let mut builder = LayerBuilder::new();
+        builder.add_layer("Layer1").visible(false);
+        builder.add_layer("Layer2").visible(false);
+
+        let refs = vec![ObjectRef::new(1, 0), ObjectRef::new(2, 0)];
+        let props = builder.build_oc_properties(&refs);
+
+        if let Some(Object::Dictionary(d_dict)) = props.get("D") {
+            assert!(!d_dict.contains_key("ON"));
+            if let Some(Object::Array(off_arr)) = d_dict.get("OFF") {
+                assert_eq!(off_arr.len(), 2);
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_oc_properties_more_layers_than_refs() {
+        // When there are more layers than refs, extra layers are skipped
+        let mut builder = LayerBuilder::new();
+        builder.add_layer("Layer1").visible(true);
+        builder.add_layer("Layer2").visible(true);
+        builder.add_layer("Layer3").visible(true);
+
+        let refs = vec![ObjectRef::new(1, 0)]; // Only 1 ref for 3 layers
+        let props = builder.build_oc_properties(&refs);
+
+        if let Some(Object::Dictionary(d_dict)) = props.get("D") {
+            if let Some(Object::Array(on_arr)) = d_dict.get("ON") {
+                assert_eq!(on_arr.len(), 1); // Only first layer included
+            }
+        }
+    }
+
+    // ---- Tests for LayerMembership ----
+
+    #[test]
+    fn test_layer_membership_add_ocg() {
+        let mut membership = LayerMembership::new(ObjectRef::new(1, 0));
+        membership.add_ocg(ObjectRef::new(2, 0));
+        membership.add_ocg(ObjectRef::new(3, 0));
+        assert_eq!(membership.ocgs.len(), 3);
+    }
+
+    #[test]
+    fn test_layer_membership_policy_method() {
+        let membership =
+            LayerMembership::new(ObjectRef::new(1, 0)).policy(VisibilityPolicy::AllOff);
+        assert_eq!(membership.policy, VisibilityPolicy::AllOff);
+    }
+
+    #[test]
+    fn test_layer_membership_ocmd_single_ocg() {
+        let membership = LayerMembership::new(ObjectRef::new(5, 0));
+        let dict = membership.build_ocmd_dict();
+
+        // Single OCG should be a Reference, not an Array
+        if let Some(Object::Reference(r)) = dict.get("OCGs") {
+            assert_eq!(r.id, 5);
+            assert_eq!(r.gen, 0);
+        } else {
+            panic!("Expected single Reference for single OCG");
+        }
+    }
+
+    #[test]
+    fn test_layer_membership_ocmd_multiple_ocgs() {
+        let mut membership = LayerMembership::new(ObjectRef::new(5, 0));
+        membership.add_ocg(ObjectRef::new(6, 0));
+        let dict = membership.build_ocmd_dict();
+
+        // Multiple OCGs should be an Array
+        if let Some(Object::Array(arr)) = dict.get("OCGs") {
+            assert_eq!(arr.len(), 2);
+        } else {
+            panic!("Expected Array for multiple OCGs");
+        }
+    }
+
+    #[test]
+    fn test_layer_membership_ocmd_all_policies() {
+        let policies = vec![
+            (VisibilityPolicy::AllOn, "AllOn"),
+            (VisibilityPolicy::AnyOn, "AnyOn"),
+            (VisibilityPolicy::AllOff, "AllOff"),
+            (VisibilityPolicy::AnyOff, "AnyOff"),
+        ];
+
+        for (policy, expected_name) in policies {
+            let membership = LayerMembership::new(ObjectRef::new(1, 0)).policy(policy);
+            let dict = membership.build_ocmd_dict();
+            if let Some(Object::Name(name)) = dict.get("P") {
+                assert_eq!(name, expected_name);
+            } else {
+                panic!("Expected Name for P key");
+            }
+        }
+    }
+
+    // ---- Tests for LayerVisibility ----
+
+    #[test]
+    fn test_layer_visibility_default() {
+        assert_eq!(LayerVisibility::default(), LayerVisibility::On);
+    }
+
+    // ---- Tests for LayerIntent ----
+
+    #[test]
+    fn test_layer_intent_default() {
+        assert_eq!(LayerIntent::default(), LayerIntent::View);
+    }
+
+    #[test]
+    fn test_layer_intent_equality() {
+        assert_eq!(LayerIntent::View, LayerIntent::View);
+        assert_eq!(LayerIntent::Design, LayerIntent::Design);
+        assert_eq!(LayerIntent::Both, LayerIntent::Both);
+        assert_ne!(LayerIntent::View, LayerIntent::Design);
+        assert_ne!(LayerIntent::View, LayerIntent::Both);
+    }
 }

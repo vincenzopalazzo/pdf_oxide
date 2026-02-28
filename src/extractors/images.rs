@@ -681,7 +681,9 @@ pub fn extract_image_from_xobject(
 
     log::debug!("Image filters detected: {:?}", filter_names);
 
-    let is_jpeg = filter_names.iter().any(|name| name == "DCTDecode");
+    let has_dct = filter_names.iter().any(|name| name == "DCTDecode");
+    let is_jpeg_only = has_dct && filter_names.len() == 1;
+    let is_jpeg_chain = has_dct && filter_names.len() > 1;
 
     // Check for CCITT parameter mismatch (incorrectly labeled as JBIG2Decode)
     let mut ccitt_params_override: Option<crate::decoders::CcittParams> = None;
@@ -714,12 +716,22 @@ pub fn extract_image_from_xobject(
     }
 
     // Extract image data
-    let data = if is_jpeg {
-        // JPEG pass-through - extract raw stream data without decoding
+    let data = if is_jpeg_only {
+        // DCTDecode is the sole filter - raw pass-through (stream data is already JPEG)
         match xobject {
             Object::Stream { data, .. } => ImageData::Jpeg(data.to_vec()),
             _ => return Err(Error::Image("XObject is not a stream".to_string())),
         }
+    } else if is_jpeg_chain {
+        // DCTDecode with other filters (e.g., [FlateDecode, DCTDecode]).
+        // The raw stream data still has preceding filters applied (e.g., deflate-compressed).
+        // Decode the full chain — DctDecoder is a pass-through, so the result is valid JPEG.
+        let decoded = if let (Some(doc), Some(ref_id)) = (doc, obj_ref) {
+            doc.decode_stream_with_encryption(xobject, ref_id)?
+        } else {
+            xobject.decode_stream_data()?
+        };
+        ImageData::Jpeg(decoded)
     } else if ccitt_params_override.is_some() {
         // Special handling: If we detected CCITT parameters override, extract the raw stream
         // without applying the (incorrect) JBIG2Decode filter
@@ -1533,5 +1545,646 @@ mod tests {
         let base64_part = data_uri.strip_prefix("data:image/jpeg;base64,").unwrap();
         let decoded = STANDARD.decode(base64_part).unwrap();
         assert_eq!(decoded, jpeg_data);
+    }
+
+    // === ColorSpace advanced components tests ===
+
+    #[test]
+    fn test_color_space_calgray_components() {
+        assert_eq!(ColorSpace::CalGray.components(), 1);
+    }
+
+    #[test]
+    fn test_color_space_calrgb_components() {
+        assert_eq!(ColorSpace::CalRGB.components(), 3);
+    }
+
+    #[test]
+    fn test_color_space_lab_components() {
+        assert_eq!(ColorSpace::Lab.components(), 3);
+    }
+
+    #[test]
+    fn test_color_space_iccbased_components() {
+        assert_eq!(ColorSpace::ICCBased(1).components(), 1);
+        assert_eq!(ColorSpace::ICCBased(3).components(), 3);
+        assert_eq!(ColorSpace::ICCBased(4).components(), 4);
+    }
+
+    #[test]
+    fn test_color_space_separation_components() {
+        assert_eq!(ColorSpace::Separation.components(), 1);
+    }
+
+    #[test]
+    fn test_color_space_devicen_components() {
+        assert_eq!(ColorSpace::DeviceN.components(), 4);
+    }
+
+    #[test]
+    fn test_color_space_pattern_components() {
+        assert_eq!(ColorSpace::Pattern.components(), 0);
+    }
+
+    // === color_space_to_pixel_format advanced tests ===
+
+    #[test]
+    fn test_color_space_to_pixel_format_calgray() {
+        assert_eq!(color_space_to_pixel_format(&ColorSpace::CalGray), PixelFormat::Grayscale);
+    }
+
+    #[test]
+    fn test_color_space_to_pixel_format_calrgb() {
+        assert_eq!(color_space_to_pixel_format(&ColorSpace::CalRGB), PixelFormat::RGB);
+    }
+
+    #[test]
+    fn test_color_space_to_pixel_format_lab() {
+        assert_eq!(color_space_to_pixel_format(&ColorSpace::Lab), PixelFormat::RGB);
+    }
+
+    #[test]
+    fn test_color_space_to_pixel_format_iccbased_1() {
+        assert_eq!(color_space_to_pixel_format(&ColorSpace::ICCBased(1)), PixelFormat::Grayscale);
+    }
+
+    #[test]
+    fn test_color_space_to_pixel_format_iccbased_3() {
+        assert_eq!(color_space_to_pixel_format(&ColorSpace::ICCBased(3)), PixelFormat::RGB);
+    }
+
+    #[test]
+    fn test_color_space_to_pixel_format_iccbased_4() {
+        assert_eq!(color_space_to_pixel_format(&ColorSpace::ICCBased(4)), PixelFormat::CMYK);
+    }
+
+    #[test]
+    fn test_color_space_to_pixel_format_iccbased_other() {
+        assert_eq!(color_space_to_pixel_format(&ColorSpace::ICCBased(2)), PixelFormat::RGB);
+    }
+
+    #[test]
+    fn test_color_space_to_pixel_format_separation() {
+        assert_eq!(color_space_to_pixel_format(&ColorSpace::Separation), PixelFormat::Grayscale);
+    }
+
+    #[test]
+    fn test_color_space_to_pixel_format_devicen() {
+        assert_eq!(color_space_to_pixel_format(&ColorSpace::DeviceN), PixelFormat::CMYK);
+    }
+
+    #[test]
+    fn test_color_space_to_pixel_format_pattern() {
+        assert_eq!(color_space_to_pixel_format(&ColorSpace::Pattern), PixelFormat::RGB);
+    }
+
+    // === parse_color_space advanced tests ===
+
+    #[test]
+    fn test_parse_color_space_pattern_name() {
+        use crate::object::Object;
+        let obj = Object::Name("Pattern".to_string());
+        let cs = parse_color_space(&obj).unwrap();
+        assert_eq!(cs, ColorSpace::Pattern);
+    }
+
+    #[test]
+    fn test_parse_color_space_calgray_array() {
+        use crate::object::Object;
+        let obj = Object::Array(vec![Object::Name("CalGray".to_string())]);
+        let cs = parse_color_space(&obj).unwrap();
+        assert_eq!(cs, ColorSpace::CalGray);
+    }
+
+    #[test]
+    fn test_parse_color_space_calrgb_array() {
+        use crate::object::Object;
+        let obj = Object::Array(vec![Object::Name("CalRGB".to_string())]);
+        let cs = parse_color_space(&obj).unwrap();
+        assert_eq!(cs, ColorSpace::CalRGB);
+    }
+
+    #[test]
+    fn test_parse_color_space_lab_array() {
+        use crate::object::Object;
+        let obj = Object::Array(vec![Object::Name("Lab".to_string())]);
+        let cs = parse_color_space(&obj).unwrap();
+        assert_eq!(cs, ColorSpace::Lab);
+    }
+
+    #[test]
+    fn test_parse_color_space_separation_array() {
+        use crate::object::Object;
+        let obj = Object::Array(vec![Object::Name("Separation".to_string())]);
+        let cs = parse_color_space(&obj).unwrap();
+        assert_eq!(cs, ColorSpace::Separation);
+    }
+
+    #[test]
+    fn test_parse_color_space_devicen_array() {
+        use crate::object::Object;
+        let obj = Object::Array(vec![Object::Name("DeviceN".to_string())]);
+        let cs = parse_color_space(&obj).unwrap();
+        assert_eq!(cs, ColorSpace::DeviceN);
+    }
+
+    #[test]
+    fn test_parse_color_space_pattern_array() {
+        use crate::object::Object;
+        let obj = Object::Array(vec![Object::Name("Pattern".to_string())]);
+        let cs = parse_color_space(&obj).unwrap();
+        assert_eq!(cs, ColorSpace::Pattern);
+    }
+
+    #[test]
+    fn test_parse_color_space_iccbased_with_n() {
+        use crate::object::Object;
+        use std::collections::HashMap;
+        let mut stream_dict = HashMap::new();
+        stream_dict.insert("N".to_string(), Object::Integer(4));
+        let obj = Object::Array(vec![
+            Object::Name("ICCBased".to_string()),
+            Object::Dictionary(stream_dict),
+        ]);
+        let cs = parse_color_space(&obj).unwrap();
+        assert_eq!(cs, ColorSpace::ICCBased(4));
+    }
+
+    #[test]
+    fn test_parse_color_space_iccbased_no_n() {
+        use crate::object::Object;
+        use std::collections::HashMap;
+        let stream_dict = HashMap::new(); // No N entry
+        let obj = Object::Array(vec![
+            Object::Name("ICCBased".to_string()),
+            Object::Dictionary(stream_dict),
+        ]);
+        let cs = parse_color_space(&obj).unwrap();
+        assert_eq!(cs, ColorSpace::ICCBased(3)); // defaults to 3
+    }
+
+    #[test]
+    fn test_parse_color_space_iccbased_short_array() {
+        use crate::object::Object;
+        let obj = Object::Array(vec![Object::Name("ICCBased".to_string())]);
+        let cs = parse_color_space(&obj).unwrap();
+        assert_eq!(cs, ColorSpace::ICCBased(3)); // defaults to 3
+    }
+
+    #[test]
+    fn test_parse_color_space_iccbased_non_dict_element() {
+        use crate::object::Object;
+        let obj = Object::Array(vec![
+            Object::Name("ICCBased".to_string()),
+            Object::Integer(42), // Not a dict
+        ]);
+        let cs = parse_color_space(&obj).unwrap();
+        assert_eq!(cs, ColorSpace::ICCBased(3)); // defaults to 3
+    }
+
+    #[test]
+    fn test_parse_color_space_unsupported_array() {
+        use crate::object::Object;
+        let obj = Object::Array(vec![Object::Name("FancyColor".to_string())]);
+        let result = parse_color_space(&obj);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_color_space_array_no_name() {
+        use crate::object::Object;
+        let obj = Object::Array(vec![Object::Integer(42)]);
+        let result = parse_color_space(&obj);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_color_space_empty_array() {
+        use crate::object::Object;
+        let obj = Object::Array(vec![]);
+        let result = parse_color_space(&obj);
+        assert!(result.is_err());
+    }
+
+    // === PdfImage methods tests ===
+
+    #[test]
+    fn test_pdf_image_set_bbox() {
+        let mut image = PdfImage::new(
+            10,
+            10,
+            ColorSpace::DeviceGray,
+            8,
+            ImageData::Raw {
+                pixels: vec![0; 100],
+                format: PixelFormat::Grayscale,
+            },
+        );
+        assert!(image.bbox().is_none());
+        let bbox = Rect::new(10.0, 20.0, 30.0, 40.0);
+        image.set_bbox(bbox);
+        assert_eq!(*image.bbox().unwrap(), bbox);
+    }
+
+    #[test]
+    fn test_pdf_image_set_ccitt_params() {
+        let mut image = PdfImage::new(
+            10,
+            10,
+            ColorSpace::DeviceGray,
+            1,
+            ImageData::Raw {
+                pixels: vec![0; 10],
+                format: PixelFormat::Grayscale,
+            },
+        );
+        assert!(image.ccitt_params().is_none());
+        let params = crate::decoders::CcittParams {
+            columns: 10,
+            rows: Some(10),
+            ..Default::default()
+        };
+        image.set_ccitt_params(params.clone());
+        assert!(image.ccitt_params().is_some());
+        assert_eq!(image.ccitt_params().unwrap().columns, 10);
+    }
+
+    #[test]
+    fn test_pdf_image_with_ccitt_params_constructor() {
+        let params = crate::decoders::CcittParams {
+            columns: 100,
+            rows: Some(200),
+            ..Default::default()
+        };
+        let image = PdfImage::with_ccitt_params(
+            100,
+            200,
+            ColorSpace::DeviceGray,
+            1,
+            ImageData::Raw {
+                pixels: vec![0; 100],
+                format: PixelFormat::Grayscale,
+            },
+            params,
+        );
+        assert_eq!(image.width(), 100);
+        assert_eq!(image.height(), 200);
+        assert!(image.ccitt_params().is_some());
+        assert!(image.bbox().is_none());
+    }
+
+    // === CMYK conversion edge cases ===
+
+    #[test]
+    fn test_cmyk_to_rgb_empty() {
+        let cmyk: Vec<u8> = vec![];
+        let rgb = cmyk_to_rgb(&cmyk);
+        assert!(rgb.is_empty());
+    }
+
+    #[test]
+    fn test_cmyk_to_rgb_partial_chunk_ignored() {
+        // chunks_exact(4) ignores remainder
+        let cmyk = vec![0, 0, 0, 0, 255]; // 4 + 1 extra byte
+        let rgb = cmyk_to_rgb(&cmyk);
+        assert_eq!(rgb.len(), 3); // only 1 complete pixel processed
+    }
+
+    // === to_dynamic_image tests ===
+
+    #[test]
+    fn test_to_dynamic_image_rgb() {
+        let pixels = vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
+        let image = PdfImage::new(
+            2,
+            2,
+            ColorSpace::DeviceRGB,
+            8,
+            ImageData::Raw {
+                pixels,
+                format: PixelFormat::RGB,
+            },
+        );
+        let dyn_img = image.to_dynamic_image().unwrap();
+        assert_eq!(dyn_img.width(), 2);
+        assert_eq!(dyn_img.height(), 2);
+    }
+
+    #[test]
+    fn test_to_dynamic_image_grayscale() {
+        let pixels = vec![0, 128, 192, 255];
+        let image = PdfImage::new(
+            2,
+            2,
+            ColorSpace::DeviceGray,
+            8,
+            ImageData::Raw {
+                pixels,
+                format: PixelFormat::Grayscale,
+            },
+        );
+        let dyn_img = image.to_dynamic_image().unwrap();
+        assert_eq!(dyn_img.width(), 2);
+        assert_eq!(dyn_img.height(), 2);
+    }
+
+    #[test]
+    fn test_to_dynamic_image_cmyk() {
+        // 1 pixel CMYK -> RGB
+        let pixels = vec![0, 0, 0, 0]; // white
+        let image = PdfImage::new(
+            1,
+            1,
+            ColorSpace::DeviceCMYK,
+            8,
+            ImageData::Raw {
+                pixels,
+                format: PixelFormat::CMYK,
+            },
+        );
+        let dyn_img = image.to_dynamic_image().unwrap();
+        assert_eq!(dyn_img.width(), 1);
+        assert_eq!(dyn_img.height(), 1);
+    }
+
+    #[test]
+    fn test_to_dynamic_image_grayscale_as_other_colorspace() {
+        // Grayscale format with non-DeviceGray colorspace falls into "other" branch
+        let pixels = vec![128, 128, 128, 128];
+        let image = PdfImage::new(
+            2,
+            2,
+            ColorSpace::CalGray, // Not DeviceGray, so hits "other" branch
+            8,
+            ImageData::Raw {
+                pixels,
+                format: PixelFormat::Grayscale,
+            },
+        );
+        let dyn_img = image.to_dynamic_image().unwrap();
+        assert_eq!(dyn_img.width(), 2);
+        assert_eq!(dyn_img.height(), 2);
+    }
+
+    #[test]
+    fn test_to_dynamic_image_rgb_non_device_rgb() {
+        // RGB format with non-DeviceRGB colorspace falls into "other" branch
+        let pixels = vec![128, 128, 128, 64, 64, 64, 32, 32, 32, 255, 255, 255];
+        let image = PdfImage::new(
+            2,
+            2,
+            ColorSpace::CalRGB, // Not DeviceRGB, so hits "other" branch
+            8,
+            ImageData::Raw {
+                pixels,
+                format: PixelFormat::RGB,
+            },
+        );
+        let dyn_img = image.to_dynamic_image().unwrap();
+        assert_eq!(dyn_img.width(), 2);
+        assert_eq!(dyn_img.height(), 2);
+    }
+
+    // === expand_inline_image_dict tests ===
+
+    #[test]
+    fn test_expand_inline_image_dict_abbreviations() {
+        use crate::object::Object;
+        use std::collections::HashMap;
+
+        let mut dict = HashMap::new();
+        dict.insert("W".to_string(), Object::Integer(100));
+        dict.insert("H".to_string(), Object::Integer(200));
+        dict.insert("CS".to_string(), Object::Name("DeviceRGB".to_string()));
+        dict.insert("BPC".to_string(), Object::Integer(8));
+        dict.insert("F".to_string(), Object::Name("DCTDecode".to_string()));
+
+        let expanded = expand_inline_image_dict(dict);
+
+        assert!(expanded.contains_key("Width"));
+        assert!(expanded.contains_key("Height"));
+        assert!(expanded.contains_key("ColorSpace"));
+        assert!(expanded.contains_key("BitsPerComponent"));
+        assert!(expanded.contains_key("Filter"));
+        assert!(!expanded.contains_key("W"));
+    }
+
+    #[test]
+    fn test_expand_inline_image_dict_all_keys() {
+        use crate::object::Object;
+        use std::collections::HashMap;
+
+        let mut dict = HashMap::new();
+        dict.insert("DP".to_string(), Object::Null);
+        dict.insert("IM".to_string(), Object::Boolean(true));
+        dict.insert("I".to_string(), Object::Boolean(false));
+        dict.insert("D".to_string(), Object::Array(vec![]));
+        dict.insert("EF".to_string(), Object::Null);
+        dict.insert("Intent".to_string(), Object::Name("RelativeColorimetric".to_string()));
+
+        let expanded = expand_inline_image_dict(dict);
+
+        assert!(expanded.contains_key("DecodeParms"));
+        assert!(expanded.contains_key("ImageMask"));
+        assert!(expanded.contains_key("Interpolate"));
+        assert!(expanded.contains_key("Decode"));
+        assert!(expanded.contains_key("EFontFile"));
+        assert!(expanded.contains_key("Intent"));
+    }
+
+    #[test]
+    fn test_expand_inline_image_dict_unknown_key_preserved() {
+        use crate::object::Object;
+        use std::collections::HashMap;
+
+        let mut dict = HashMap::new();
+        dict.insert("CustomKey".to_string(), Object::Integer(42));
+
+        let expanded = expand_inline_image_dict(dict);
+
+        assert!(expanded.contains_key("CustomKey"));
+        assert_eq!(expanded.get("CustomKey").unwrap(), &Object::Integer(42));
+    }
+
+    #[test]
+    fn test_expand_inline_image_dict_empty() {
+        use std::collections::HashMap;
+        let dict = HashMap::new();
+        let expanded = expand_inline_image_dict(dict);
+        assert!(expanded.is_empty());
+    }
+
+    // === ImageData tests ===
+
+    #[test]
+    fn test_image_data_jpeg_variant() {
+        let data = ImageData::Jpeg(vec![0xFF, 0xD8]);
+        match &data {
+            ImageData::Jpeg(d) => assert_eq!(d, &[0xFF, 0xD8]),
+            _ => panic!("Expected Jpeg"),
+        }
+    }
+
+    #[test]
+    fn test_image_data_raw_variant() {
+        let data = ImageData::Raw {
+            pixels: vec![1, 2, 3],
+            format: PixelFormat::RGB,
+        };
+        match &data {
+            ImageData::Raw { pixels, format } => {
+                assert_eq!(pixels, &[1, 2, 3]);
+                assert_eq!(*format, PixelFormat::RGB);
+            },
+            _ => panic!("Expected Raw"),
+        }
+    }
+
+    #[test]
+    fn test_image_data_equality() {
+        let a = ImageData::Jpeg(vec![1, 2]);
+        let b = ImageData::Jpeg(vec![1, 2]);
+        let c = ImageData::Jpeg(vec![3, 4]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    // === save_raw_as_jpeg tests ===
+
+    #[test]
+    fn test_save_raw_grayscale_as_jpeg() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_path = temp_dir.path().join("test_gray.jpg");
+        let pixels = vec![0, 128, 192, 255];
+        let result = save_raw_as_jpeg(&pixels, 2, 2, PixelFormat::Grayscale, &output_path);
+        assert!(result.is_ok());
+        assert!(output_path.exists());
+    }
+
+    #[test]
+    fn test_save_raw_cmyk_as_jpeg() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_path = temp_dir.path().join("test_cmyk.jpg");
+        let pixels = vec![255, 0, 0, 0]; // cyan
+        let result = save_raw_as_jpeg(&pixels, 1, 1, PixelFormat::CMYK, &output_path);
+        assert!(result.is_ok());
+        assert!(output_path.exists());
+    }
+
+    // === PdfImage save methods with different data types ===
+
+    #[test]
+    fn test_pdf_image_save_grayscale_as_png() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_path = temp_dir.path().join("gray.png");
+        let image = PdfImage::new(
+            2,
+            2,
+            ColorSpace::DeviceGray,
+            8,
+            ImageData::Raw {
+                pixels: vec![0, 128, 192, 255],
+                format: PixelFormat::Grayscale,
+            },
+        );
+        assert!(image.save_as_png(&output_path).is_ok());
+    }
+
+    #[test]
+    fn test_pdf_image_save_cmyk_as_png() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_path = temp_dir.path().join("cmyk.png");
+        let image = PdfImage::new(
+            1,
+            1,
+            ColorSpace::DeviceCMYK,
+            8,
+            ImageData::Raw {
+                pixels: vec![0, 0, 0, 0],
+                format: PixelFormat::CMYK,
+            },
+        );
+        assert!(image.save_as_png(&output_path).is_ok());
+    }
+
+    // === extract_image errors ===
+
+    #[test]
+    fn test_extract_image_not_a_stream() {
+        use crate::object::Object;
+        let obj = Object::Integer(42);
+        let result = extract_image_from_xobject(None, &obj, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_image_missing_height() {
+        use crate::object::Object;
+        use std::collections::HashMap;
+        let mut dict = HashMap::new();
+        dict.insert("Subtype".to_string(), Object::Name("Image".to_string()));
+        dict.insert("Width".to_string(), Object::Integer(100));
+        dict.insert("ColorSpace".to_string(), Object::Name("DeviceRGB".to_string()));
+        let xobject = Object::Stream {
+            dict,
+            data: bytes::Bytes::from(vec![]),
+        };
+        let result = extract_image_from_xobject(None, &xobject, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_image_missing_colorspace() {
+        use crate::object::Object;
+        use std::collections::HashMap;
+        let mut dict = HashMap::new();
+        dict.insert("Subtype".to_string(), Object::Name("Image".to_string()));
+        dict.insert("Width".to_string(), Object::Integer(1));
+        dict.insert("Height".to_string(), Object::Integer(1));
+        let xobject = Object::Stream {
+            dict,
+            data: bytes::Bytes::from(vec![0, 0, 0]),
+        };
+        let result = extract_image_from_xobject(None, &xobject, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_image_default_bpc() {
+        use crate::object::Object;
+        use std::collections::HashMap;
+        let mut dict = HashMap::new();
+        dict.insert("Subtype".to_string(), Object::Name("Image".to_string()));
+        dict.insert("Width".to_string(), Object::Integer(1));
+        dict.insert("Height".to_string(), Object::Integer(1));
+        // No BitsPerComponent - should default to 8
+        dict.insert("ColorSpace".to_string(), Object::Name("DeviceRGB".to_string()));
+        let xobject = Object::Stream {
+            dict,
+            data: bytes::Bytes::from(vec![255, 0, 0]),
+        };
+        let image = extract_image_from_xobject(None, &xobject, None).unwrap();
+        assert_eq!(image.bits_per_component(), 8);
+    }
+
+    #[test]
+    fn test_extract_image_filter_array_multiple() {
+        use crate::object::Object;
+        use std::collections::HashMap;
+        let mut dict = HashMap::new();
+        dict.insert("Subtype".to_string(), Object::Name("Image".to_string()));
+        dict.insert("Width".to_string(), Object::Integer(1));
+        dict.insert("Height".to_string(), Object::Integer(1));
+        dict.insert("BitsPerComponent".to_string(), Object::Integer(8));
+        dict.insert("ColorSpace".to_string(), Object::Name("DeviceRGB".to_string()));
+        // Filter is an integer (invalid) - should result in empty filter names
+        dict.insert("Filter".to_string(), Object::Integer(42));
+        let xobject = Object::Stream {
+            dict,
+            data: bytes::Bytes::from(vec![255, 0, 0]),
+        };
+        let image = extract_image_from_xobject(None, &xobject, None).unwrap();
+        // Should still extract successfully (no filter applied)
+        assert_eq!(image.width(), 1);
     }
 }

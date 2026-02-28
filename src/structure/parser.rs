@@ -7,13 +7,86 @@ use crate::document::PdfDocument;
 use crate::error::Error;
 use crate::object::Object;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
 
-/// Maximum time allowed for structure tree parsing.
+/// Maximum time allowed for structure tree parsing (native only).
 /// Documents with huge trees (50K+ elements) would take 5-10s;
 /// a 200ms budget lets small/medium trees parse fully while
 /// large trees fall back to content-stream order gracefully.
-const STRUCT_TREE_PARSE_BUDGET: Duration = Duration::from_millis(200);
+#[cfg(not(target_arch = "wasm32"))]
+const STRUCT_TREE_PARSE_BUDGET: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// A deadline guard that works on both native and WASM targets.
+///
+/// On native, uses `std::time::Instant` for real time-based deadlines.
+/// On `wasm32-unknown-unknown`, `std::time::Instant` panics at runtime,
+/// so this becomes a no-op and the parser relies solely on `MAX_STRUCT_ELEMENTS`.
+#[derive(Clone, Copy)]
+struct Deadline {
+    #[cfg(not(target_arch = "wasm32"))]
+    instant: std::time::Instant,
+}
+
+impl Deadline {
+    /// Create a deadline that expires after the configured budget.
+    fn new() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self {
+                instant: std::time::Instant::now() + STRUCT_TREE_PARSE_BUDGET,
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self {}
+        }
+    }
+
+    /// Returns `true` if the deadline has been exceeded.
+    #[inline]
+    fn is_expired(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            std::time::Instant::now() > self.instant
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    }
+}
+
+/// A timer for measuring elapsed time, WASM-safe.
+#[derive(Clone, Copy)]
+struct Timer {
+    #[cfg(not(target_arch = "wasm32"))]
+    start: std::time::Instant,
+}
+
+impl Timer {
+    fn now() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self {
+                start: std::time::Instant::now(),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self {}
+        }
+    }
+
+    fn elapsed_debug(&self) -> String {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            format!("{:?}", self.start.elapsed())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            "(time unavailable on wasm)".to_string()
+        }
+    }
+}
 
 /// Maximum number of structure elements to parse.
 /// Trees larger than this cause expensive traversal (seconds for 50K+ elements).
@@ -129,7 +202,7 @@ fn build_page_map_recursive(
 /// * `Ok(None)` - If the document is not tagged or the tree is too large to parse in budget
 /// * `Err(Error)` - If parsing fails
 pub fn parse_structure_tree(document: &mut PdfDocument) -> Result<Option<StructTreeRoot>, Error> {
-    let parse_start = Instant::now();
+    let parse_start = Timer::now();
 
     // Get catalog
     let catalog = document.catalog()?;
@@ -148,7 +221,7 @@ pub fn parse_structure_tree(document: &mut PdfDocument) -> Result<Option<StructT
     let page_map = build_page_map(document);
 
     // Start the deadline AFTER page map building (which is fixed cost)
-    let deadline = Instant::now() + STRUCT_TREE_PARSE_BUDGET;
+    let deadline = Deadline::new();
 
     // Resolve the StructTreeRoot object
     let struct_tree_root_obj = resolve_object(document, struct_tree_root_ref)?;
@@ -187,10 +260,9 @@ pub fn parse_structure_tree(document: &mut PdfDocument) -> Result<Option<StructT
             Object::Array(arr) => {
                 // Multiple root elements
                 for elem_obj in arr {
-                    if Instant::now() > deadline {
+                    if deadline.is_expired() {
                         log::debug!(
-                            "Structure tree parse budget exceeded ({:?}), falling back to content order",
-                            STRUCT_TREE_PARSE_BUDGET
+                            "Structure tree parse budget exceeded, falling back to content order"
                         );
                         return Ok(None);
                     }
@@ -230,10 +302,10 @@ pub fn parse_structure_tree(document: &mut PdfDocument) -> Result<Option<StructT
     }
 
     log::debug!(
-        "Structure tree parsed: {} elements, {} root elements in {:?}",
+        "Structure tree parsed: {} elements, {} root elements in {}",
         element_count,
         struct_tree.root_elements.len(),
-        parse_start.elapsed()
+        parse_start.elapsed_debug()
     );
 
     if element_count > MAX_STRUCT_ELEMENTS {
@@ -257,11 +329,11 @@ fn parse_struct_elem(
     obj: &Object,
     role_map: &HashMap<String, String>,
     page_map: &HashMap<u32, u32>,
-    deadline: Instant,
+    deadline: Deadline,
     element_count: &mut usize,
 ) -> Result<Option<StructElem>, Error> {
     // Check budgets before doing work
-    if Instant::now() > deadline || *element_count > MAX_STRUCT_ELEMENTS {
+    if deadline.is_expired() || *element_count > MAX_STRUCT_ELEMENTS {
         return Ok(None);
     }
     *element_count += 1;
@@ -349,7 +421,7 @@ fn parse_k_children(
     parent: &mut StructElem,
     role_map: &HashMap<String, String>,
     page_map: &HashMap<u32, u32>,
-    deadline: Instant,
+    deadline: Deadline,
     element_count: &mut usize,
 ) -> Result<(), Error> {
     match k_obj {
@@ -365,7 +437,7 @@ fn parse_k_children(
             // Array of children
             for child_obj in arr {
                 // Check both time and element count budgets
-                if Instant::now() > deadline || *element_count > MAX_STRUCT_ELEMENTS {
+                if deadline.is_expired() || *element_count > MAX_STRUCT_ELEMENTS {
                     return Ok(());
                 }
 
@@ -546,5 +618,144 @@ mod tests {
             .map(|s| s.as_str())
             .unwrap_or("Heading1");
         assert_eq!(mapped, "H1");
+    }
+
+    #[test]
+    fn test_decode_pdf_text_string_utf8() {
+        let text = b"Hello World";
+        assert_eq!(decode_pdf_text_string(text), "Hello World");
+    }
+
+    #[test]
+    fn test_decode_pdf_text_string_utf16be() {
+        // UTF-16BE BOM + "AB"
+        let bytes = vec![0xFE, 0xFF, 0x00, 0x41, 0x00, 0x42];
+        assert_eq!(decode_pdf_text_string(&bytes), "AB");
+    }
+
+    #[test]
+    fn test_decode_pdf_text_string_utf16le() {
+        // UTF-16LE BOM + "AB"
+        let bytes = vec![0xFF, 0xFE, 0x41, 0x00, 0x42, 0x00];
+        assert_eq!(decode_pdf_text_string(&bytes), "AB");
+    }
+
+    #[test]
+    fn test_decode_pdf_text_string_pdfdoc_encoding() {
+        // ASCII subset works as PDFDocEncoding
+        let bytes = vec![0x48, 0x65, 0x6C, 0x6C, 0x6F]; // "Hello"
+        let result = decode_pdf_text_string(&bytes);
+        assert_eq!(result, "Hello");
+    }
+
+    #[test]
+    fn test_resolve_object_direct() {
+        // Direct object should be returned as-is
+        let obj = Object::Integer(42);
+        let mut doc = {
+            let pdf = build_test_pdf();
+            PdfDocument::open_from_bytes(pdf).unwrap()
+        };
+        let result = resolve_object(&mut doc, &obj).unwrap();
+        assert_eq!(result, Object::Integer(42));
+    }
+
+    #[test]
+    fn test_parse_marked_content_ref_not_dict() {
+        let obj = Object::Integer(5);
+        let page_map = HashMap::new();
+        let result = parse_marked_content_ref(&obj, &page_map).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_marked_content_ref_wrong_type() {
+        let mut dict = HashMap::new();
+        dict.insert("Type".to_string(), Object::Name("NotMCR".to_string()));
+        dict.insert("MCID".to_string(), Object::Integer(5));
+        let obj = Object::Dictionary(dict);
+        let page_map = HashMap::new();
+        let result = parse_marked_content_ref(&obj, &page_map).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_marked_content_ref_missing_mcid() {
+        let mut dict = HashMap::new();
+        dict.insert("Type".to_string(), Object::Name("MCR".to_string()));
+        let obj = Object::Dictionary(dict);
+        let page_map = HashMap::new();
+        let result = parse_marked_content_ref(&obj, &page_map).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_marked_content_ref_valid() {
+        let mut dict = HashMap::new();
+        dict.insert("Type".to_string(), Object::Name("MCR".to_string()));
+        dict.insert("MCID".to_string(), Object::Integer(7));
+        let obj = Object::Dictionary(dict);
+        let page_map = HashMap::new();
+        let result = parse_marked_content_ref(&obj, &page_map).unwrap();
+        assert!(result.is_some());
+        if let Some(StructChild::MarkedContentRef { mcid, page }) = result {
+            assert_eq!(mcid, 7);
+            assert_eq!(page, 0); // default
+        }
+    }
+
+    #[test]
+    fn test_parse_marked_content_ref_with_page() {
+        let mut page_map = HashMap::new();
+        page_map.insert(10, 2u32); // object 10 -> page 2
+
+        let mut dict = HashMap::new();
+        dict.insert("Type".to_string(), Object::Name("MCR".to_string()));
+        dict.insert("MCID".to_string(), Object::Integer(3));
+        dict.insert(
+            "Pg".to_string(),
+            Object::Reference(crate::object::ObjectRef { id: 10, gen: 0 }),
+        );
+        let obj = Object::Dictionary(dict);
+        let result = parse_marked_content_ref(&obj, &page_map).unwrap();
+        if let Some(StructChild::MarkedContentRef { mcid, page }) = result {
+            assert_eq!(mcid, 3);
+            assert_eq!(page, 2);
+        } else {
+            panic!("Expected MarkedContentRef");
+        }
+    }
+
+    #[test]
+    fn test_parse_structure_tree_untagged_pdf() {
+        let pdf = build_test_pdf();
+        let mut doc = PdfDocument::open_from_bytes(pdf).unwrap();
+        let result = parse_structure_tree(&mut doc).unwrap();
+        assert!(result.is_none()); // No StructTreeRoot in minimal PDF
+    }
+
+    /// Build a minimal PDF for testing
+    fn build_test_pdf() -> Vec<u8> {
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let off1 = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        let off2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+        let off3 = pdf.len();
+        pdf.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 4\n");
+        pdf.extend_from_slice(b"0000000000 65535 f \r\n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \r\n", off1).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \r\n", off2).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \r\n", off3).as_bytes());
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", xref_offset)
+                .as_bytes(),
+        );
+        pdf
     }
 }

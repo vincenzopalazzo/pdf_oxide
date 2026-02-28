@@ -13,7 +13,9 @@ use crate::object::{Object, ObjectRef};
 use crate::writer::{ContentStreamBuilder, ObjectSerializer};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufWriter, Read, Seek, Write};
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::BufWriter;
+use std::io::{Read, Seek, Write};
 use std::path::Path;
 
 /// Document metadata (Info dictionary).
@@ -518,7 +520,7 @@ struct AnnotationAppearance {
 }
 
 /// Information about an image on a page.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ImageInfo {
     /// XObject name (e.g., "Im1")
     pub name: String,
@@ -551,6 +553,7 @@ impl DocumentEditor {
     ///
     /// let editor = DocumentEditor::open("document.pdf")?;
     /// ```
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path_str = path.as_ref().to_string_lossy().to_string();
         let mut source = PdfDocument::open(path.as_ref())?;
@@ -590,6 +593,65 @@ impl DocumentEditor {
             deleted_form_fields: HashSet::new(),
             acroform_modified: false,
         })
+    }
+
+    /// Open a PDF document for editing from in-memory bytes.
+    ///
+    /// This is the equivalent of `open()` but works with byte data instead of a file path,
+    /// making it suitable for WASM environments where filesystem access is unavailable.
+    pub fn open_from_bytes(data: Vec<u8>) -> Result<Self> {
+        let mut source = PdfDocument::open_from_bytes(data)?;
+        let page_count = source.page_count()?;
+        let next_id = Self::find_max_object_id(&source) + 1;
+        let page_order: Vec<i32> = (0..page_count as i32).collect();
+
+        Ok(Self {
+            source,
+            source_path: String::new(),
+            modified_objects: HashMap::new(),
+            new_objects: Vec::new(),
+            next_object_id: next_id,
+            modified_info: None,
+            page_order,
+            original_page_count: page_count,
+            is_modified: false,
+            modified_content: HashMap::new(),
+            resource_manager: ResourceManager::new(),
+            structure_modified: false,
+            modified_annotations: HashMap::new(),
+            modified_page_props: HashMap::new(),
+            erase_regions: HashMap::new(),
+            flatten_annotations_pages: std::collections::HashSet::new(),
+            apply_redactions_pages: std::collections::HashSet::new(),
+            image_modifications: HashMap::new(),
+            flatten_forms_pages: std::collections::HashSet::new(),
+            remove_acroform: false,
+            embedded_files: Vec::new(),
+            modified_form_fields: HashMap::new(),
+            deleted_form_fields: HashSet::new(),
+            acroform_modified: false,
+        })
+    }
+
+    /// Save the document to an in-memory byte vector.
+    ///
+    /// This is the equivalent of `save()` but returns bytes instead of writing to a file,
+    /// making it suitable for WASM environments where filesystem access is unavailable.
+    pub fn save_to_bytes(&mut self) -> Result<Vec<u8>> {
+        self.save_to_bytes_with_options(SaveOptions::full_rewrite())
+    }
+
+    /// Save the document to an in-memory byte vector with specific options.
+    pub fn save_to_bytes_with_options(&mut self, options: SaveOptions) -> Result<Vec<u8>> {
+        use std::io::Cursor;
+        if options.incremental {
+            return Err(Error::InvalidPdf(
+                "Incremental saves are not supported for in-memory output".to_string(),
+            ));
+        }
+        let mut cursor = Cursor::new(Vec::new());
+        self.write_full_to_writer(&mut cursor, options.encryption.as_ref())?;
+        Ok(cursor.into_inner())
     }
 
     /// Find the maximum object ID in the document.
@@ -859,6 +921,7 @@ impl DocumentEditor {
     /// editor.merge_from("appendix.pdf")?;
     /// editor.save("combined.pdf")?;
     /// ```
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn merge_from(&mut self, source_path: impl AsRef<Path>) -> Result<usize> {
         // Open the source document
         let mut source_doc = PdfDocument::open(source_path.as_ref())?;
@@ -883,6 +946,29 @@ impl DocumentEditor {
         Ok(source_page_count)
     }
 
+    /// Merge another PDF (from raw bytes) into this document.
+    ///
+    /// Works in all environments including WebAssembly.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Raw bytes of the PDF to merge
+    ///
+    /// # Returns
+    ///
+    /// Number of pages merged from the source PDF.
+    pub fn merge_from_bytes(&mut self, data: &[u8]) -> Result<usize> {
+        let mut source_doc = PdfDocument::open_from_bytes(data.to_vec())?;
+        let source_page_count = source_doc.page_count()?;
+
+        if source_page_count == 0 {
+            return Ok(0);
+        }
+
+        self.is_modified = true;
+        Ok(source_page_count)
+    }
+
     /// Merge specific pages from another PDF into this document.
     ///
     /// # Arguments
@@ -899,6 +985,7 @@ impl DocumentEditor {
     /// editor.merge_pages_from("source.pdf", &[0, 2, 4])?;  // Merge pages 1, 3, 5
     /// editor.save("combined.pdf")?;
     /// ```
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn merge_pages_from(
         &mut self,
         source_path: impl AsRef<Path>,
@@ -944,6 +1031,7 @@ impl DocumentEditor {
     }
 
     /// Write an incremental update to the PDF.
+    #[cfg(not(target_arch = "wasm32"))]
     fn write_incremental(&mut self, path: impl AsRef<Path>) -> Result<()> {
         // Read original file
         let original_bytes = self.read_source_bytes()?;
@@ -958,6 +1046,11 @@ impl DocumentEditor {
 
         // Start incremental update section
         let update_start = original_len as u64;
+
+        // Sync form field changes into modified_objects before writing
+        if self.acroform_modified {
+            self.flush_form_fields_to_modified_objects()?;
+        }
 
         // Track new xref entries
         let mut xref_entries: Vec<(u32, u64, u16)> = Vec::new();
@@ -1025,11 +1118,115 @@ impl DocumentEditor {
         Ok(())
     }
 
+    /// Sync modified form fields into `modified_objects` for incremental save.
+    ///
+    /// For each modified field wrapper, loads the original PDF annotation object,
+    /// updates its `/V` entry (and `/AS` for checkboxes/radios), and inserts the
+    /// updated object into `modified_objects`. Also sets `/NeedAppearances true`
+    /// in the AcroForm dictionary so PDF readers regenerate appearance streams.
+    fn flush_form_fields_to_modified_objects(&mut self) -> Result<()> {
+        use crate::extractors::forms::FieldType;
+
+        // Collect field data we need before mutating self
+        let fields_to_flush: Vec<(u32, u16, Object, bool)> = {
+            let mut result = Vec::new();
+            for wrapper in self.modified_form_fields.values() {
+                if !wrapper.is_modified() || wrapper.is_new() {
+                    continue;
+                }
+                let obj_ref = match wrapper.object_ref() {
+                    Some(r) => r,
+                    None => continue,
+                };
+
+                // Build the new /V value from the modified value
+                let new_value: Object = match &wrapper.modified_value {
+                    Some(val) => val.into(),
+                    None => continue,
+                };
+
+                let is_button = wrapper
+                    .field_type()
+                    .map(|ft| *ft == FieldType::Button)
+                    .unwrap_or(false);
+
+                result.push((obj_ref.id, obj_ref.gen, new_value, is_button));
+            }
+            result
+        };
+
+        // Now load and update each field object
+        for (obj_id, obj_gen, new_value, is_button) in &fields_to_flush {
+            let obj_ref = ObjectRef::new(*obj_id, *obj_gen);
+            let original = self.source.load_object(obj_ref)?;
+
+            let dict = match original.as_dict() {
+                Some(d) => d.clone(),
+                None => continue,
+            };
+
+            let mut new_dict = dict;
+            new_dict.insert("V".to_string(), new_value.clone());
+
+            // For button fields (checkboxes/radios), also update /AS to match /V
+            if *is_button {
+                new_dict.insert("AS".to_string(), new_value.clone());
+            }
+
+            self.modified_objects
+                .insert(*obj_id, Object::Dictionary(new_dict));
+        }
+
+        // Set /NeedAppearances true in the AcroForm dictionary
+        if !fields_to_flush.is_empty() {
+            let catalog = self.source.catalog()?;
+            let catalog_dict = catalog
+                .as_dict()
+                .ok_or_else(|| Error::InvalidPdf("Catalog is not a dictionary".to_string()))?;
+
+            if let Some(acroform_obj) = catalog_dict.get("AcroForm") {
+                if let Some(acroform_ref) = acroform_obj.as_reference() {
+                    // AcroForm is an indirect reference — load, modify, and write back
+                    let acroform = self.source.load_object(acroform_ref)?;
+                    if let Some(af_dict) = acroform.as_dict() {
+                        let mut new_af = af_dict.clone();
+                        new_af.insert("NeedAppearances".to_string(), Object::Boolean(true));
+                        self.modified_objects
+                            .insert(acroform_ref.id, Object::Dictionary(new_af));
+                    }
+                } else if let Some(af_dict) = acroform_obj.as_dict() {
+                    // AcroForm is an inline dictionary in the catalog — modify catalog
+                    let mut new_af = af_dict.clone();
+                    new_af.insert("NeedAppearances".to_string(), Object::Boolean(true));
+                    let mut new_catalog = catalog_dict.clone();
+                    new_catalog.insert("AcroForm".to_string(), Object::Dictionary(new_af));
+
+                    // Get catalog object ID from trailer /Root reference
+                    if let Some(trailer_dict) = self.source.trailer().as_dict() {
+                        if let Some(root_ref) =
+                            trailer_dict.get("Root").and_then(|r| r.as_reference())
+                        {
+                            self.modified_objects
+                                .insert(root_ref.id, Object::Dictionary(new_catalog));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Find the offset of the previous xref table in the original PDF.
     fn find_prev_xref_offset(&self, bytes: &[u8]) -> Result<u64> {
         // Search backwards from the end for "startxref"
         let search = b"startxref";
-        let mut pos = bytes.len().saturating_sub(100);
+        let end = bytes.len();
+        let mut pos = if end >= search.len() {
+            end - search.len()
+        } else {
+            0
+        };
 
         while pos > 0 {
             if bytes[pos..].starts_with(search) {
@@ -1056,27 +1253,26 @@ impl DocumentEditor {
     }
 
     /// Write a full rewrite of the PDF.
+    #[cfg(not(target_arch = "wasm32"))]
     fn write_full(
         &mut self,
         path: impl AsRef<Path>,
         encryption_config: Option<&EncryptionConfig>,
     ) -> Result<()> {
+        let file = File::create(path.as_ref())?;
+        let mut writer = BufWriter::new(file);
+        self.write_full_to_writer(&mut writer, encryption_config)
+    }
+
+    /// Write a full rewrite of the PDF to a generic writer.
+    fn write_full_to_writer(
+        &mut self,
+        writer: &mut (impl Write + Seek),
+        encryption_config: Option<&EncryptionConfig>,
+    ) -> Result<()> {
         use crate::encryption::{
             generate_file_id, Algorithm, EncryptDictBuilder, EncryptionWriteHandler,
         };
-
-        // For full rewrite, we need to:
-        // 1. Collect all objects (original + modified + new)
-        // 2. Optionally remove unused objects
-        // 3. Write complete new PDF structure
-
-        // This is a more complex operation that requires:
-        // - Traversing all reachable objects from the catalog
-        // - Updating object references if IDs change
-        // - Writing new header, body, xref, trailer
-
-        let file = File::create(path.as_ref())?;
-        let mut writer = BufWriter::new(file);
 
         // Write PDF header
         let (major, minor) = self.version();
@@ -3803,7 +3999,8 @@ impl DocumentEditor {
         for field in source_fields {
             if field.full_name == name {
                 // Create wrapper and set value
-                let mut wrapper = FormFieldWrapper::from_read(field, 0, None);
+                let obj_ref = field.object_ref;
+                let mut wrapper = FormFieldWrapper::from_read(field, 0, obj_ref);
                 wrapper.set_value(value);
 
                 self.modified_form_fields.insert(name.to_string(), wrapper);
@@ -5606,12 +5803,20 @@ impl EditableDocument for DocumentEditor {
         self.save_with_options(path, SaveOptions::full_rewrite())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn save_with_options(&mut self, path: impl AsRef<Path>, options: SaveOptions) -> Result<()> {
         if options.incremental {
             self.write_incremental(path)
         } else {
             self.write_full(path, options.encryption.as_ref())
         }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn save_with_options(&mut self, _path: impl AsRef<Path>, _options: SaveOptions) -> Result<()> {
+        Err(Error::InvalidPdf(
+            "Filesystem save is not available in WASM. Use save_to_bytes() instead.".to_string(),
+        ))
     }
 }
 
@@ -5777,5 +5982,2774 @@ mod tests {
         assert!(inc.incremental);
         assert!(!inc.compress);
         assert!(!inc.garbage_collect);
+    }
+
+    // =========================================================================
+    // DocumentInfo: additional coverage
+    // =========================================================================
+
+    #[test]
+    fn test_document_info_default_is_all_none() {
+        let info = DocumentInfo::default();
+        assert_eq!(info.title, None);
+        assert_eq!(info.author, None);
+        assert_eq!(info.subject, None);
+        assert_eq!(info.keywords, None);
+        assert_eq!(info.creator, None);
+        assert_eq!(info.producer, None);
+        assert_eq!(info.creation_date, None);
+        assert_eq!(info.mod_date, None);
+    }
+
+    #[test]
+    fn test_document_info_creator_producer() {
+        let info = DocumentInfo::new()
+            .creator("pdf_oxide")
+            .producer("Rust PDF Library");
+        assert_eq!(info.creator, Some("pdf_oxide".to_string()));
+        assert_eq!(info.producer, Some("Rust PDF Library".to_string()));
+    }
+
+    #[test]
+    fn test_document_info_to_object_all_fields() {
+        let info = DocumentInfo {
+            title: Some("Title".into()),
+            author: Some("Author".into()),
+            subject: Some("Subject".into()),
+            keywords: Some("Keywords".into()),
+            creator: Some("Creator".into()),
+            producer: Some("Producer".into()),
+            creation_date: Some("D:20260101000000".into()),
+            mod_date: Some("D:20260226000000".into()),
+        };
+
+        let obj = info.to_object();
+        let dict = obj.as_dict().unwrap();
+
+        assert_eq!(dict.len(), 8);
+        assert!(dict.contains_key("Title"));
+        assert!(dict.contains_key("Author"));
+        assert!(dict.contains_key("Subject"));
+        assert!(dict.contains_key("Keywords"));
+        assert!(dict.contains_key("Creator"));
+        assert!(dict.contains_key("Producer"));
+        assert!(dict.contains_key("CreationDate"));
+        assert!(dict.contains_key("ModDate"));
+    }
+
+    #[test]
+    fn test_document_info_to_object_empty() {
+        let info = DocumentInfo::default();
+        let obj = info.to_object();
+        let dict = obj.as_dict().unwrap();
+        assert!(dict.is_empty());
+    }
+
+    #[test]
+    fn test_document_info_roundtrip() {
+        let original = DocumentInfo {
+            title: Some("My Title".into()),
+            author: Some("My Author".into()),
+            subject: Some("My Subject".into()),
+            keywords: Some("a, b, c".into()),
+            creator: Some("TestCreator".into()),
+            producer: Some("TestProducer".into()),
+            creation_date: Some("D:20260101".into()),
+            mod_date: Some("D:20260226".into()),
+        };
+
+        let obj = original.to_object();
+        let reconstructed = DocumentInfo::from_object(&obj);
+
+        assert_eq!(original.title, reconstructed.title);
+        assert_eq!(original.author, reconstructed.author);
+        assert_eq!(original.subject, reconstructed.subject);
+        assert_eq!(original.keywords, reconstructed.keywords);
+        assert_eq!(original.creator, reconstructed.creator);
+        assert_eq!(original.producer, reconstructed.producer);
+        assert_eq!(original.creation_date, reconstructed.creation_date);
+        assert_eq!(original.mod_date, reconstructed.mod_date);
+    }
+
+    #[test]
+    fn test_document_info_from_non_dict() {
+        // from_object on a non-dict should return all None
+        let obj = Object::Integer(42);
+        let info = DocumentInfo::from_object(&obj);
+        assert_eq!(info.title, None);
+        assert_eq!(info.author, None);
+    }
+
+    #[test]
+    fn test_document_info_from_dict_with_wrong_types() {
+        // Values that are not Object::String should be ignored
+        let mut dict = HashMap::new();
+        dict.insert("Title".to_string(), Object::Integer(123));
+        dict.insert("Author".to_string(), Object::Boolean(true));
+
+        let obj = Object::Dictionary(dict);
+        let info = DocumentInfo::from_object(&obj);
+        assert_eq!(info.title, None);
+        assert_eq!(info.author, None);
+    }
+
+    // =========================================================================
+    // SaveOptions: additional coverage
+    // =========================================================================
+
+    #[test]
+    fn test_save_options_default() {
+        let opts = SaveOptions::default();
+        assert!(!opts.incremental);
+        assert!(!opts.compress);
+        assert!(!opts.linearize);
+        assert!(!opts.garbage_collect);
+        assert!(opts.encryption.is_none());
+    }
+
+    #[test]
+    fn test_save_options_with_encryption() {
+        let config = EncryptionConfig::new("user", "owner");
+        let opts = SaveOptions::with_encryption(config);
+        assert!(!opts.incremental);
+        assert!(opts.compress);
+        assert!(opts.garbage_collect);
+        assert!(opts.encryption.is_some());
+    }
+
+    // =========================================================================
+    // EncryptionAlgorithm
+    // =========================================================================
+
+    #[test]
+    fn test_encryption_algorithm_default() {
+        let algo = EncryptionAlgorithm::default();
+        assert_eq!(algo, EncryptionAlgorithm::Aes256);
+    }
+
+    #[test]
+    fn test_encryption_algorithm_variants() {
+        let _ = EncryptionAlgorithm::Rc4_40;
+        let _ = EncryptionAlgorithm::Rc4_128;
+        let _ = EncryptionAlgorithm::Aes128;
+        let _ = EncryptionAlgorithm::Aes256;
+    }
+
+    // =========================================================================
+    // Permissions
+    // =========================================================================
+
+    #[test]
+    fn test_permissions_all() {
+        let perms = Permissions::all();
+        assert!(perms.print);
+        assert!(perms.print_high_quality);
+        assert!(perms.modify);
+        assert!(perms.copy);
+        assert!(perms.annotate);
+        assert!(perms.fill_forms);
+        assert!(perms.accessibility);
+        assert!(perms.assemble);
+    }
+
+    #[test]
+    fn test_permissions_read_only() {
+        let perms = Permissions::read_only();
+        assert!(!perms.print);
+        assert!(!perms.print_high_quality);
+        assert!(!perms.modify);
+        assert!(!perms.copy);
+        assert!(!perms.annotate);
+        assert!(!perms.fill_forms);
+        assert!(perms.accessibility); // Always true for compliance
+        assert!(!perms.assemble);
+    }
+
+    #[test]
+    fn test_permissions_to_bits_all() {
+        let perms = Permissions::all();
+        let bits = perms.to_bits();
+
+        // All permission bits should be set
+        assert!(bits & (1 << 2) != 0); // print
+        assert!(bits & (1 << 3) != 0); // modify
+        assert!(bits & (1 << 4) != 0); // copy
+        assert!(bits & (1 << 5) != 0); // annotate
+        assert!(bits & (1 << 8) != 0); // fill_forms
+        assert!(bits & (1 << 9) != 0); // accessibility
+        assert!(bits & (1 << 10) != 0); // assemble
+        assert!(bits & (1 << 11) != 0); // print_high_quality
+    }
+
+    #[test]
+    fn test_permissions_to_bits_read_only() {
+        let perms = Permissions::read_only();
+        let bits = perms.to_bits();
+
+        // Only accessibility should be set (plus reserved bits)
+        assert!(bits & (1 << 2) == 0); // print not set
+        assert!(bits & (1 << 3) == 0); // modify not set
+        assert!(bits & (1 << 4) == 0); // copy not set
+        assert!(bits & (1 << 5) == 0); // annotate not set
+        assert!(bits & (1 << 8) == 0); // fill_forms not set
+        assert!(bits & (1 << 9) != 0); // accessibility is set
+        assert!(bits & (1 << 10) == 0); // assemble not set
+        assert!(bits & (1 << 11) == 0); // print_high_quality not set
+    }
+
+    #[test]
+    fn test_permissions_to_bits_reserved_bits() {
+        // Reserved bits 7-8 (0-indexed: 6-7) and 13-32 (0-indexed: 12-31) must be 1
+        let perms = Permissions::default();
+        let bits = perms.to_bits();
+
+        // Bits 6 and 7 must be set
+        assert!(bits & (1 << 6) != 0);
+        assert!(bits & (1 << 7) != 0);
+
+        // Bits 12-31 must be set
+        for bit in 12..32 {
+            assert!(bits & (1 << bit) != 0, "bit {} should be set", bit);
+        }
+    }
+
+    #[test]
+    fn test_permissions_to_bits_individual_flags() {
+        // Test each flag individually
+        let mut perms = Permissions::default();
+        let base_bits = perms.to_bits();
+
+        perms.print = true;
+        assert_eq!(perms.to_bits(), base_bits | (1 << 2));
+
+        perms = Permissions::default();
+        perms.modify = true;
+        assert_eq!(perms.to_bits(), base_bits | (1 << 3));
+
+        perms = Permissions::default();
+        perms.copy = true;
+        assert_eq!(perms.to_bits(), base_bits | (1 << 4));
+
+        perms = Permissions::default();
+        perms.annotate = true;
+        assert_eq!(perms.to_bits(), base_bits | (1 << 5));
+
+        perms = Permissions::default();
+        perms.fill_forms = true;
+        assert_eq!(perms.to_bits(), base_bits | (1 << 8));
+
+        perms = Permissions::default();
+        perms.assemble = true;
+        assert_eq!(perms.to_bits(), base_bits | (1 << 10));
+
+        perms = Permissions::default();
+        perms.print_high_quality = true;
+        assert_eq!(perms.to_bits(), base_bits | (1 << 11));
+    }
+
+    // =========================================================================
+    // EncryptionConfig
+    // =========================================================================
+
+    #[test]
+    fn test_encryption_config_new() {
+        let config = EncryptionConfig::new("user_pw", "owner_pw");
+        assert_eq!(config.user_password, "user_pw");
+        assert_eq!(config.owner_password, "owner_pw");
+        assert_eq!(config.algorithm, EncryptionAlgorithm::Aes256);
+        // Permissions should be all by default
+        assert!(config.permissions.print);
+        assert!(config.permissions.copy);
+    }
+
+    #[test]
+    fn test_encryption_config_default() {
+        let config = EncryptionConfig::default();
+        assert!(config.user_password.is_empty());
+        assert!(config.owner_password.is_empty());
+        assert_eq!(config.algorithm, EncryptionAlgorithm::Aes256);
+    }
+
+    #[test]
+    fn test_encryption_config_with_algorithm() {
+        let config = EncryptionConfig::new("u", "o").with_algorithm(EncryptionAlgorithm::Aes128);
+        assert_eq!(config.algorithm, EncryptionAlgorithm::Aes128);
+    }
+
+    #[test]
+    fn test_encryption_config_with_permissions() {
+        let config = EncryptionConfig::new("u", "o").with_permissions(Permissions::read_only());
+        assert!(!config.permissions.print);
+        assert!(config.permissions.accessibility);
+    }
+
+    // =========================================================================
+    // ModifiedPageProps
+    // =========================================================================
+
+    #[test]
+    fn test_modified_page_props_default() {
+        let props = ModifiedPageProps::default();
+        assert!(props.rotation.is_none());
+        assert!(props.media_box.is_none());
+        assert!(props.crop_box.is_none());
+    }
+
+    #[test]
+    fn test_modified_page_props_with_values() {
+        let props = ModifiedPageProps {
+            rotation: Some(90),
+            media_box: Some([0.0, 0.0, 612.0, 792.0]),
+            crop_box: Some([10.0, 10.0, 602.0, 782.0]),
+        };
+        assert_eq!(props.rotation, Some(90));
+        assert_eq!(props.media_box, Some([0.0, 0.0, 612.0, 792.0]));
+        assert_eq!(props.crop_box, Some([10.0, 10.0, 602.0, 782.0]));
+    }
+
+    // =========================================================================
+    // apply_page_props_to_object (private, tested from within module)
+    // =========================================================================
+
+    /// Helper to create a minimal DocumentEditor for internal method testing.
+    /// Returns a DocumentEditor from a minimal valid PDF.
+    fn create_test_editor() -> DocumentEditor {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        let pdf_bytes = minimal_pdf_bytes();
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp =
+            std::env::temp_dir().join(format!("pdf_oxide_test_{}_{id}.pdf", std::process::id()));
+        std::fs::write(&tmp, &pdf_bytes).unwrap();
+        let editor = DocumentEditor::open(&tmp).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+        editor
+    }
+
+    /// Generates bytes for a minimal valid PDF with one page.
+    fn minimal_pdf_bytes() -> Vec<u8> {
+        let pdf = b"%PDF-1.4\n\
+            1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+            2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n\
+            3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n\
+            xref\n\
+            0 4\n\
+            0000000000 65535 f \n\
+            0000000009 00000 n \n\
+            0000000058 00000 n \n\
+            0000000115 00000 n \n\
+            trailer\n<< /Size 4 /Root 1 0 R >>\n\
+            startxref\n197\n%%EOF\n";
+        pdf.to_vec()
+    }
+
+    #[test]
+    fn test_apply_page_props_rotation() {
+        let editor = create_test_editor();
+
+        let mut page_dict = HashMap::new();
+        page_dict.insert("Type".to_string(), Object::Name("Page".to_string()));
+        let page_obj = Object::Dictionary(page_dict);
+
+        let props = ModifiedPageProps {
+            rotation: Some(90),
+            media_box: None,
+            crop_box: None,
+        };
+
+        let result = editor
+            .apply_page_props_to_object(&page_obj, &props)
+            .unwrap();
+        let dict = result.as_dict().unwrap();
+        assert_eq!(dict.get("Rotate").unwrap().as_integer().unwrap(), 90);
+    }
+
+    #[test]
+    fn test_apply_page_props_media_box() {
+        let editor = create_test_editor();
+
+        let mut page_dict = HashMap::new();
+        page_dict.insert("Type".to_string(), Object::Name("Page".to_string()));
+        let page_obj = Object::Dictionary(page_dict);
+
+        let props = ModifiedPageProps {
+            rotation: None,
+            media_box: Some([0.0, 0.0, 300.0, 400.0]),
+            crop_box: None,
+        };
+
+        let result = editor
+            .apply_page_props_to_object(&page_obj, &props)
+            .unwrap();
+        let dict = result.as_dict().unwrap();
+        let mb = dict.get("MediaBox").unwrap().as_array().unwrap();
+        assert_eq!(mb.len(), 4);
+    }
+
+    #[test]
+    fn test_apply_page_props_crop_box() {
+        let editor = create_test_editor();
+
+        let mut page_dict = HashMap::new();
+        page_dict.insert("Type".to_string(), Object::Name("Page".to_string()));
+        let page_obj = Object::Dictionary(page_dict);
+
+        let props = ModifiedPageProps {
+            rotation: None,
+            media_box: None,
+            crop_box: Some([10.0, 10.0, 602.0, 782.0]),
+        };
+
+        let result = editor
+            .apply_page_props_to_object(&page_obj, &props)
+            .unwrap();
+        let dict = result.as_dict().unwrap();
+        assert!(dict.contains_key("CropBox"));
+    }
+
+    #[test]
+    fn test_apply_page_props_all_at_once() {
+        let editor = create_test_editor();
+
+        let mut page_dict = HashMap::new();
+        page_dict.insert("Type".to_string(), Object::Name("Page".to_string()));
+        let page_obj = Object::Dictionary(page_dict);
+
+        let props = ModifiedPageProps {
+            rotation: Some(180),
+            media_box: Some([0.0, 0.0, 500.0, 700.0]),
+            crop_box: Some([20.0, 20.0, 480.0, 680.0]),
+        };
+
+        let result = editor
+            .apply_page_props_to_object(&page_obj, &props)
+            .unwrap();
+        let dict = result.as_dict().unwrap();
+        assert!(dict.contains_key("Rotate"));
+        assert!(dict.contains_key("MediaBox"));
+        assert!(dict.contains_key("CropBox"));
+    }
+
+    #[test]
+    fn test_apply_page_props_non_dict_error() {
+        let editor = create_test_editor();
+        let page_obj = Object::Integer(42);
+        let props = ModifiedPageProps::default();
+
+        let result = editor.apply_page_props_to_object(&page_obj, &props);
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // generate_erase_overlay
+    // =========================================================================
+
+    #[test]
+    fn test_generate_erase_overlay_no_regions() {
+        let editor = create_test_editor();
+        // No regions added for page 0
+        let result = editor.generate_erase_overlay(0);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_generate_erase_overlay_empty_regions() {
+        let mut editor = create_test_editor();
+        // Insert an empty vec for page 5
+        editor.erase_regions.insert(5, vec![]);
+        let result = editor.generate_erase_overlay(5);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_generate_erase_overlay_single_region() {
+        let mut editor = create_test_editor();
+        editor
+            .erase_regions
+            .insert(0, vec![[10.0, 20.0, 100.0, 200.0]]);
+
+        let content = editor.generate_erase_overlay(0).unwrap();
+        let content_str = String::from_utf8(content).unwrap();
+
+        assert!(content_str.contains("q\n"));
+        assert!(content_str.contains("1 1 1 rg\n"));
+        assert!(content_str.contains("re f\n"));
+        assert!(content_str.contains("Q\n"));
+    }
+
+    #[test]
+    fn test_generate_erase_overlay_multiple_regions() {
+        let mut editor = create_test_editor();
+        editor
+            .erase_regions
+            .insert(0, vec![[10.0, 20.0, 100.0, 200.0], [300.0, 400.0, 500.0, 600.0]]);
+
+        let content = editor.generate_erase_overlay(0).unwrap();
+        let content_str = String::from_utf8(content).unwrap();
+
+        // Should contain two "re f" operations
+        assert_eq!(content_str.matches("re f\n").count(), 2);
+    }
+
+    // =========================================================================
+    // generate_flatten_overlay
+    // =========================================================================
+
+    #[test]
+    fn test_generate_flatten_overlay_empty() {
+        let editor = create_test_editor();
+        let content = editor.generate_flatten_overlay(&[], &[]);
+        assert!(content.is_empty());
+    }
+
+    #[test]
+    fn test_generate_flatten_overlay_single_appearance() {
+        let editor = create_test_editor();
+
+        let appearance = AnnotationAppearance {
+            content: b"test content".to_vec(),
+            bbox: [0.0, 0.0, 100.0, 50.0],
+            annot_rect: [10.0, 20.0, 210.0, 70.0],
+            matrix: None,
+            resources: None,
+        };
+
+        let names = vec!["FlatAnnot0".to_string()];
+        let content = editor.generate_flatten_overlay(&[appearance], &names);
+        let content_str = String::from_utf8(content).unwrap();
+
+        assert!(content_str.contains("q\n"));
+        assert!(content_str.contains("cm\n"));
+        assert!(content_str.contains("/FlatAnnot0 Do\n"));
+        assert!(content_str.contains("Q\n"));
+    }
+
+    #[test]
+    fn test_generate_flatten_overlay_with_matrix() {
+        let editor = create_test_editor();
+
+        let appearance = AnnotationAppearance {
+            content: b"test".to_vec(),
+            bbox: [0.0, 0.0, 100.0, 100.0],
+            annot_rect: [0.0, 0.0, 100.0, 100.0],
+            matrix: Some([1.0, 0.0, 0.0, 1.0, 5.0, 5.0]),
+            resources: None,
+        };
+
+        let names = vec!["Xobj0".to_string()];
+        let content = editor.generate_flatten_overlay(&[appearance], &names);
+        let content_str = String::from_utf8(content).unwrap();
+
+        // Should have two cm operators: one for positioning, one for the appearance matrix
+        assert_eq!(content_str.matches("cm\n").count(), 2);
+    }
+
+    #[test]
+    fn test_generate_flatten_overlay_zero_size_bbox() {
+        let editor = create_test_editor();
+
+        let appearance = AnnotationAppearance {
+            content: b"empty".to_vec(),
+            bbox: [0.0, 0.0, 0.0, 0.0], // zero-size
+            annot_rect: [10.0, 20.0, 110.0, 120.0],
+            matrix: None,
+            resources: None,
+        };
+
+        let names = vec!["Xobj0".to_string()];
+        let content = editor.generate_flatten_overlay(&[appearance], &names);
+        let content_str = String::from_utf8(content).unwrap();
+
+        // Should still generate content even with zero bbox (uses 1.0 fallback for scale)
+        assert!(content_str.contains("/Xobj0 Do\n"));
+    }
+
+    // =========================================================================
+    // generate_redaction_overlay
+    // =========================================================================
+
+    #[test]
+    fn test_generate_redaction_overlay_single() {
+        let editor = create_test_editor();
+
+        let redactions = vec![RedactionData {
+            rect: [50.0, 100.0, 200.0, 150.0],
+            color: [0.0, 0.0, 0.0],
+        }];
+
+        let content = editor.generate_redaction_overlay(&redactions);
+        let content_str = String::from_utf8(content).unwrap();
+
+        assert!(content_str.contains("q\n"));
+        assert!(content_str.contains("0.000 0.000 0.000 rg\n"));
+        assert!(content_str.contains("re f\n"));
+        assert!(content_str.contains("Q\n"));
+    }
+
+    #[test]
+    fn test_generate_redaction_overlay_custom_color() {
+        let editor = create_test_editor();
+
+        let redactions = vec![RedactionData {
+            rect: [0.0, 0.0, 100.0, 100.0],
+            color: [1.0, 0.0, 0.0], // Red
+        }];
+
+        let content = editor.generate_redaction_overlay(&redactions);
+        let content_str = String::from_utf8(content).unwrap();
+        assert!(content_str.contains("1.000 0.000 0.000 rg\n"));
+    }
+
+    #[test]
+    fn test_generate_redaction_overlay_multiple() {
+        let editor = create_test_editor();
+
+        let redactions = vec![
+            RedactionData {
+                rect: [0.0, 0.0, 100.0, 50.0],
+                color: [0.0, 0.0, 0.0],
+            },
+            RedactionData {
+                rect: [200.0, 200.0, 400.0, 300.0],
+                color: [0.5, 0.5, 0.5],
+            },
+        ];
+
+        let content = editor.generate_redaction_overlay(&redactions);
+        let content_str = String::from_utf8(content).unwrap();
+
+        // Should contain two q/Q pairs
+        assert_eq!(content_str.matches("q\n").count(), 2);
+        assert_eq!(content_str.matches("Q\n").count(), 2);
+    }
+
+    #[test]
+    fn test_generate_redaction_overlay_empty() {
+        let editor = create_test_editor();
+        let content = editor.generate_redaction_overlay(&[]);
+        assert!(content.is_empty());
+    }
+
+    // =========================================================================
+    // serialize_operator
+    // =========================================================================
+
+    #[test]
+    fn test_serialize_operator_save_restore_state() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+
+        editor.serialize_operator(&mut output, &crate::content::operators::Operator::SaveState);
+        assert_eq!(&output, b"q\n");
+
+        output.clear();
+        editor.serialize_operator(&mut output, &crate::content::operators::Operator::RestoreState);
+        assert_eq!(&output, b"Q\n");
+    }
+
+    #[test]
+    fn test_serialize_operator_cm() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::Cm {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e: 10.0,
+                f: 20.0,
+            },
+        );
+
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.contains("1.0"));
+        assert!(s.contains("10.0"));
+        assert!(s.contains("20.0"));
+        assert!(s.ends_with("cm\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_text_operations() {
+        let editor = create_test_editor();
+
+        // BT
+        let mut output = Vec::new();
+        editor.serialize_operator(&mut output, &crate::content::operators::Operator::BeginText);
+        assert_eq!(&output, b"BT\n");
+
+        // ET
+        output.clear();
+        editor.serialize_operator(&mut output, &crate::content::operators::Operator::EndText);
+        assert_eq!(&output, b"ET\n");
+
+        // Tf
+        output.clear();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::Tf {
+                font: "Helv".to_string(),
+                size: 12.0,
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.contains("/Helv"));
+        assert!(s.contains("Tf\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_td() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::Td { tx: 5.0, ty: 10.0 },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("Td\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_tj() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::Tj {
+                text: b"Hello World".to_vec(),
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.contains("Hello World"));
+        assert!(s.ends_with("Tj\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_tj_with_escapes() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::Tj {
+                text: b"Hello (World) \\ test".to_vec(),
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.contains("\\("));
+        assert!(s.contains("\\)"));
+        assert!(s.contains("\\\\"));
+    }
+
+    #[test]
+    fn test_serialize_operator_tj_array() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::TJ {
+                array: vec![
+                    crate::content::operators::TextElement::String(b"AB".to_vec()),
+                    crate::content::operators::TextElement::Offset(-120.0),
+                    crate::content::operators::TextElement::String(b"CD".to_vec()),
+                ],
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.starts_with("["));
+        assert!(s.contains("(AB)"));
+        assert!(s.contains("(CD)"));
+        assert!(s.ends_with("TJ\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_do() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::Do {
+                name: "Im1".to_string(),
+            },
+        );
+        assert_eq!(&output, b"/Im1 Do\n");
+    }
+
+    #[test]
+    fn test_serialize_operator_color_ops() {
+        let editor = create_test_editor();
+
+        // SetFillRgb
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetFillRgb {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("rg\n"));
+
+        // SetStrokeGray
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetStrokeGray { gray: 0.5 },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("G\n"));
+
+        // SetFillCmyk
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetFillCmyk {
+                c: 0.1,
+                m: 0.2,
+                y: 0.3,
+                k: 0.4,
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("k\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_path_ops() {
+        let editor = create_test_editor();
+
+        // Stroke
+        let mut output = Vec::new();
+        editor.serialize_operator(&mut output, &crate::content::operators::Operator::Stroke);
+        assert_eq!(&output, b"S\n");
+
+        // Fill
+        output.clear();
+        editor.serialize_operator(&mut output, &crate::content::operators::Operator::Fill);
+        assert_eq!(&output, b"f\n");
+
+        // FillEvenOdd
+        output.clear();
+        editor.serialize_operator(&mut output, &crate::content::operators::Operator::FillEvenOdd);
+        assert_eq!(&output, b"f*\n");
+
+        // EndPath
+        output.clear();
+        editor.serialize_operator(&mut output, &crate::content::operators::Operator::EndPath);
+        assert_eq!(&output, b"n\n");
+
+        // ClosePath
+        output.clear();
+        editor.serialize_operator(&mut output, &crate::content::operators::Operator::ClosePath);
+        assert_eq!(&output, b"h\n");
+
+        // CloseFillStroke
+        output.clear();
+        editor
+            .serialize_operator(&mut output, &crate::content::operators::Operator::CloseFillStroke);
+        assert_eq!(&output, b"b\n");
+    }
+
+    #[test]
+    fn test_serialize_operator_clipping() {
+        let editor = create_test_editor();
+
+        let mut output = Vec::new();
+        editor.serialize_operator(&mut output, &crate::content::operators::Operator::ClipNonZero);
+        assert_eq!(&output, b"W\n");
+
+        output.clear();
+        editor.serialize_operator(&mut output, &crate::content::operators::Operator::ClipEvenOdd);
+        assert_eq!(&output, b"W*\n");
+    }
+
+    #[test]
+    fn test_serialize_operator_rectangle() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::Rectangle {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 50.0,
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("re\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_marked_content() {
+        let editor = create_test_editor();
+
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::BeginMarkedContent {
+                tag: "P".to_string(),
+            },
+        );
+        assert_eq!(&output, b"/P BMC\n");
+
+        output.clear();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::EndMarkedContent,
+        );
+        assert_eq!(&output, b"EMC\n");
+    }
+
+    #[test]
+    fn test_serialize_operator_set_line_width() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetLineWidth { width: 2.5 },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("w\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_set_dash() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetDash {
+                array: vec![3.0, 2.0],
+                phase: 0.0,
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.starts_with("["));
+        assert!(s.ends_with("d\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_tstar() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(&mut output, &crate::content::operators::Operator::TStar);
+        assert_eq!(&output, b"T*\n");
+    }
+
+    #[test]
+    fn test_serialize_operator_quote() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::Quote {
+                text: b"Hello".to_vec(),
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.contains("Hello"));
+        assert!(s.ends_with("'\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_double_quote() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::DoubleQuote {
+                word_space: 1.0,
+                char_space: 0.5,
+                text: b"Hi".to_vec(),
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.contains("Hi"));
+        assert!(s.ends_with("\"\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_ext_gstate() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetExtGState {
+                dict_name: "GS1".to_string(),
+            },
+        );
+        assert_eq!(&output, b"/GS1 gs\n");
+    }
+
+    #[test]
+    fn test_serialize_operator_paint_shading() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::PaintShading {
+                name: "Sh1".to_string(),
+            },
+        );
+        assert_eq!(&output, b"/Sh1 sh\n");
+    }
+
+    #[test]
+    fn test_serialize_operator_set_rendering_intent() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetRenderingIntent {
+                intent: "RelativeColorimetric".to_string(),
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.contains("/RelativeColorimetric"));
+        assert!(s.ends_with("ri\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_color_space() {
+        let editor = create_test_editor();
+
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetFillColorSpace {
+                name: "DeviceRGB".to_string(),
+            },
+        );
+        assert_eq!(&output, b"/DeviceRGB cs\n");
+
+        output.clear();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetStrokeColorSpace {
+                name: "DeviceCMYK".to_string(),
+            },
+        );
+        assert_eq!(&output, b"/DeviceCMYK CS\n");
+    }
+
+    #[test]
+    fn test_serialize_operator_set_fill_stroke_color() {
+        let editor = create_test_editor();
+
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetFillColor {
+                components: vec![0.5, 0.6, 0.7],
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("sc\n"));
+
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetStrokeColor {
+                components: vec![0.1, 0.2],
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("SC\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_color_n_with_pattern() {
+        let editor = create_test_editor();
+
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetFillColorN {
+                components: vec![0.5],
+                name: Some(Box::new("P1".to_string())),
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.contains("/P1"));
+        assert!(s.ends_with("scn\n"));
+
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetStrokeColorN {
+                components: vec![],
+                name: None,
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("SCN\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_other() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::Other {
+                name: "DP".to_string(),
+                operands: Box::new(vec![Object::Name("MC0".to_string())]),
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.contains("/MC0"));
+        assert!(s.contains("DP"));
+    }
+
+    #[test]
+    fn test_serialize_operator_inline_image() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        let mut dict = std::collections::HashMap::new();
+        dict.insert("W".to_string(), Object::Integer(10));
+        dict.insert("H".to_string(), Object::Integer(10));
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::InlineImage {
+                dict: Box::new(dict),
+                data: vec![0xFF; 10],
+            },
+        );
+        let s = String::from_utf8_lossy(&output);
+        assert!(s.contains("BI\n"));
+        assert!(s.contains("ID "));
+        assert!(s.contains("EI\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_curves() {
+        let editor = create_test_editor();
+
+        // CurveTo
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::CurveTo {
+                x1: 1.0,
+                y1: 2.0,
+                x2: 3.0,
+                y2: 4.0,
+                x3: 5.0,
+                y3: 6.0,
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("c\n"));
+
+        // CurveToV
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::CurveToV {
+                x2: 1.0,
+                y2: 2.0,
+                x3: 3.0,
+                y3: 4.0,
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("v\n"));
+
+        // CurveToY
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::CurveToY {
+                x1: 1.0,
+                y1: 2.0,
+                x3: 3.0,
+                y3: 4.0,
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("y\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_text_state() {
+        let editor = create_test_editor();
+
+        let ops: Vec<(crate::content::operators::Operator, &str)> = vec![
+            (crate::content::operators::Operator::Tc { char_space: 1.0 }, "Tc\n"),
+            (crate::content::operators::Operator::Tw { word_space: 2.0 }, "Tw\n"),
+            (crate::content::operators::Operator::Tz { scale: 100.0 }, "Tz\n"),
+            (crate::content::operators::Operator::TL { leading: 14.0 }, "TL\n"),
+            (crate::content::operators::Operator::Tr { render: 0 }, "Tr\n"),
+            (crate::content::operators::Operator::Ts { rise: 3.0 }, "Ts\n"),
+        ];
+
+        for (op, suffix) in ops {
+            let mut output = Vec::new();
+            editor.serialize_operator(&mut output, &op);
+            let s = String::from_utf8(output).unwrap();
+            assert!(s.ends_with(suffix), "Expected suffix '{}', got '{}'", suffix, s);
+        }
+    }
+
+    // =========================================================================
+    // serialize_object
+    // =========================================================================
+
+    #[test]
+    fn test_serialize_object_null() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_object(&mut output, &Object::Null);
+        assert_eq!(&output, b"null");
+    }
+
+    #[test]
+    fn test_serialize_object_boolean() {
+        let editor = create_test_editor();
+
+        let mut output = Vec::new();
+        editor.serialize_object(&mut output, &Object::Boolean(true));
+        assert_eq!(&output, b"true");
+
+        output.clear();
+        editor.serialize_object(&mut output, &Object::Boolean(false));
+        assert_eq!(&output, b"false");
+    }
+
+    #[test]
+    fn test_serialize_object_integer() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_object(&mut output, &Object::Integer(42));
+        assert_eq!(&output, b"42");
+    }
+
+    #[test]
+    fn test_serialize_object_real() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_object(&mut output, &Object::Real(std::f64::consts::PI));
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.starts_with("3.14"));
+    }
+
+    #[test]
+    fn test_serialize_object_name() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_object(&mut output, &Object::Name("Type".to_string()));
+        assert_eq!(&output, b"/Type");
+    }
+
+    #[test]
+    fn test_serialize_object_string() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_object(&mut output, &Object::String(b"hello".to_vec()));
+        assert_eq!(&output, b"(hello)");
+    }
+
+    #[test]
+    fn test_serialize_object_string_with_escapes() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_object(&mut output, &Object::String(b"a(b)c\\d".to_vec()));
+        assert_eq!(&output, b"(a\\(b\\)c\\\\d)");
+    }
+
+    #[test]
+    fn test_serialize_object_array() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_object(
+            &mut output,
+            &Object::Array(vec![Object::Integer(1), Object::Integer(2), Object::Integer(3)]),
+        );
+        assert_eq!(&output, b"[1 2 3]");
+    }
+
+    #[test]
+    fn test_serialize_object_empty_array() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_object(&mut output, &Object::Array(vec![]));
+        assert_eq!(&output, b"[]");
+    }
+
+    #[test]
+    fn test_serialize_object_dictionary() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        let mut dict = HashMap::new();
+        dict.insert("Key".to_string(), Object::Integer(42));
+        editor.serialize_object(&mut output, &Object::Dictionary(dict));
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.starts_with("<<"));
+        assert!(s.ends_with(">>"));
+        assert!(s.contains("/Key"));
+        assert!(s.contains("42"));
+    }
+
+    #[test]
+    fn test_serialize_object_reference() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_object(&mut output, &Object::Reference(ObjectRef::new(5, 0)));
+        assert_eq!(&output, b"5 0 R");
+    }
+
+    #[test]
+    fn test_serialize_object_stream_placeholder() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_object(
+            &mut output,
+            &Object::Stream {
+                dict: HashMap::new(),
+                data: bytes::Bytes::from_static(b"data"),
+            },
+        );
+        assert_eq!(&output, b"(stream)");
+    }
+
+    // =========================================================================
+    // build_image_xobject
+    // =========================================================================
+
+    #[test]
+    fn test_build_image_xobject_jpeg() {
+        use crate::elements::{ImageContent, ImageFormat};
+
+        let image = ImageContent::new(
+            crate::geometry::Rect::new(0.0, 0.0, 100.0, 50.0),
+            ImageFormat::Jpeg,
+            vec![0xFF, 0xD8, 0xFF, 0xE0], // Fake JPEG header
+            100,
+            50,
+        );
+
+        let obj = DocumentEditor::build_image_xobject(&image);
+        if let Object::Stream { dict, data } = obj {
+            assert_eq!(dict.get("Type").unwrap(), &Object::Name("XObject".to_string()));
+            assert_eq!(dict.get("Subtype").unwrap(), &Object::Name("Image".to_string()));
+            assert_eq!(dict.get("Width").unwrap().as_integer().unwrap(), 100);
+            assert_eq!(dict.get("Height").unwrap().as_integer().unwrap(), 50);
+            assert_eq!(dict.get("Filter").unwrap(), &Object::Name("DCTDecode".to_string()));
+            assert_eq!(dict.get("ColorSpace").unwrap(), &Object::Name("DeviceRGB".to_string()));
+        } else {
+            panic!("Expected Stream object");
+        }
+    }
+
+    #[test]
+    fn test_build_image_xobject_png() {
+        use crate::elements::{ImageContent, ImageFormat};
+
+        let image = ImageContent {
+            bbox: crate::geometry::Rect::new(0.0, 0.0, 200.0, 100.0),
+            format: ImageFormat::Png,
+            data: vec![0x89, 0x50, 0x4E, 0x47], // Fake PNG header
+            width: 200,
+            height: 100,
+            bits_per_component: 8,
+            color_space: crate::elements::ColorSpace::Gray,
+            reading_order: None,
+            alt_text: None,
+            horizontal_dpi: None,
+            vertical_dpi: None,
+        };
+
+        let obj = DocumentEditor::build_image_xobject(&image);
+        if let Object::Stream { dict, .. } = obj {
+            assert_eq!(dict.get("Filter").unwrap(), &Object::Name("FlateDecode".to_string()));
+            assert_eq!(dict.get("ColorSpace").unwrap(), &Object::Name("DeviceGray".to_string()));
+        } else {
+            panic!("Expected Stream object");
+        }
+    }
+
+    #[test]
+    fn test_build_image_xobject_jpeg2000() {
+        use crate::elements::{ImageContent, ImageFormat};
+
+        let image = ImageContent {
+            bbox: crate::geometry::Rect::new(0.0, 0.0, 10.0, 10.0),
+            format: ImageFormat::Jpeg2000,
+            data: vec![0; 8],
+            width: 10,
+            height: 10,
+            bits_per_component: 8,
+            color_space: crate::elements::ColorSpace::CMYK,
+            reading_order: None,
+            alt_text: None,
+            horizontal_dpi: None,
+            vertical_dpi: None,
+        };
+
+        let obj = DocumentEditor::build_image_xobject(&image);
+        if let Object::Stream { dict, .. } = obj {
+            assert_eq!(dict.get("Filter").unwrap(), &Object::Name("JPXDecode".to_string()));
+            assert_eq!(dict.get("ColorSpace").unwrap(), &Object::Name("DeviceCMYK".to_string()));
+        } else {
+            panic!("Expected Stream object");
+        }
+    }
+
+    #[test]
+    fn test_build_image_xobject_jbig2() {
+        use crate::elements::{ImageContent, ImageFormat};
+
+        let image = ImageContent {
+            bbox: crate::geometry::Rect::new(0.0, 0.0, 10.0, 10.0),
+            format: ImageFormat::Jbig2,
+            data: vec![0; 4],
+            width: 10,
+            height: 10,
+            bits_per_component: 1,
+            color_space: crate::elements::ColorSpace::Gray,
+            reading_order: None,
+            alt_text: None,
+            horizontal_dpi: None,
+            vertical_dpi: None,
+        };
+
+        let obj = DocumentEditor::build_image_xobject(&image);
+        if let Object::Stream { dict, .. } = obj {
+            assert_eq!(dict.get("Filter").unwrap(), &Object::Name("JBIG2Decode".to_string()));
+            assert_eq!(dict.get("BitsPerComponent").unwrap().as_integer().unwrap(), 1);
+        } else {
+            panic!("Expected Stream object");
+        }
+    }
+
+    #[test]
+    fn test_build_image_xobject_unknown_format() {
+        use crate::elements::{ImageContent, ImageFormat};
+
+        let image = ImageContent {
+            bbox: crate::geometry::Rect::new(0.0, 0.0, 10.0, 10.0),
+            format: ImageFormat::Unknown,
+            data: vec![0; 4],
+            width: 10,
+            height: 10,
+            bits_per_component: 8,
+            color_space: crate::elements::ColorSpace::RGB,
+            reading_order: None,
+            alt_text: None,
+            horizontal_dpi: None,
+            vertical_dpi: None,
+        };
+
+        let obj = DocumentEditor::build_image_xobject(&image);
+        if let Object::Stream { dict, .. } = obj {
+            // Unknown format should not have a Filter
+            assert!(!dict.contains_key("Filter"));
+        } else {
+            panic!("Expected Stream object");
+        }
+    }
+
+    #[test]
+    fn test_build_image_xobject_indexed_colorspace() {
+        use crate::elements::{ImageContent, ImageFormat};
+
+        let image = ImageContent {
+            bbox: crate::geometry::Rect::new(0.0, 0.0, 10.0, 10.0),
+            format: ImageFormat::Raw,
+            data: vec![0; 10],
+            width: 10,
+            height: 10,
+            bits_per_component: 8,
+            color_space: crate::elements::ColorSpace::Indexed,
+            reading_order: None,
+            alt_text: None,
+            horizontal_dpi: None,
+            vertical_dpi: None,
+        };
+
+        let obj = DocumentEditor::build_image_xobject(&image);
+        if let Object::Stream { dict, .. } = obj {
+            assert_eq!(dict.get("ColorSpace").unwrap(), &Object::Name("Indexed".to_string()));
+            assert_eq!(dict.get("Filter").unwrap(), &Object::Name("FlateDecode".to_string()));
+        } else {
+            panic!("Expected Stream object");
+        }
+    }
+
+    #[test]
+    fn test_build_image_xobject_lab_colorspace() {
+        use crate::elements::{ImageContent, ImageFormat};
+
+        let image = ImageContent {
+            bbox: crate::geometry::Rect::new(0.0, 0.0, 10.0, 10.0),
+            format: ImageFormat::Raw,
+            data: vec![0; 10],
+            width: 10,
+            height: 10,
+            bits_per_component: 8,
+            color_space: crate::elements::ColorSpace::Lab,
+            reading_order: None,
+            alt_text: None,
+            horizontal_dpi: None,
+            vertical_dpi: None,
+        };
+
+        let obj = DocumentEditor::build_image_xobject(&image);
+        if let Object::Stream { dict, .. } = obj {
+            assert_eq!(dict.get("ColorSpace").unwrap(), &Object::Name("Lab".to_string()));
+        } else {
+            panic!("Expected Stream object");
+        }
+    }
+
+    #[test]
+    fn test_build_image_xobject_length() {
+        use crate::elements::{ImageContent, ImageFormat};
+
+        let data = vec![1, 2, 3, 4, 5];
+        let image = ImageContent::new(
+            crate::geometry::Rect::new(0.0, 0.0, 5.0, 1.0),
+            ImageFormat::Raw,
+            data.clone(),
+            5,
+            1,
+        );
+
+        let obj = DocumentEditor::build_image_xobject(&image);
+        if let Object::Stream {
+            dict,
+            data: stream_data,
+        } = obj
+        {
+            assert_eq!(dict.get("Length").unwrap().as_integer().unwrap(), 5);
+            assert_eq!(stream_data.as_ref(), &data[..]);
+        } else {
+            panic!("Expected Stream object");
+        }
+    }
+
+    // =========================================================================
+    // parse_media_box
+    // =========================================================================
+
+    #[test]
+    fn test_parse_media_box_real_values() {
+        let editor = create_test_editor();
+        let media_box = Object::Array(vec![
+            Object::Real(0.0),
+            Object::Real(0.0),
+            Object::Real(595.28),
+            Object::Real(841.89),
+        ]);
+
+        let (w, h) = editor.parse_media_box(&media_box).unwrap();
+        assert!((w - 595.28).abs() < 0.01);
+        assert!((h - 841.89).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_media_box_integer_values() {
+        let editor = create_test_editor();
+        let media_box = Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(612),
+            Object::Integer(792),
+        ]);
+
+        let (w, h) = editor.parse_media_box(&media_box).unwrap();
+        assert_eq!(w, 612.0);
+        assert_eq!(h, 792.0);
+    }
+
+    #[test]
+    fn test_parse_media_box_non_zero_origin() {
+        let editor = create_test_editor();
+        let media_box = Object::Array(vec![
+            Object::Real(50.0),
+            Object::Real(50.0),
+            Object::Real(562.0),
+            Object::Real(742.0),
+        ]);
+
+        let (w, h) = editor.parse_media_box(&media_box).unwrap();
+        assert!((w - 512.0).abs() < 0.01);
+        assert!((h - 692.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_media_box_non_array() {
+        let editor = create_test_editor();
+        let media_box = Object::Integer(42);
+
+        let (w, h) = editor.parse_media_box(&media_box).unwrap();
+        // Should return default Letter size
+        assert_eq!(w, 612.0);
+        assert_eq!(h, 792.0);
+    }
+
+    #[test]
+    fn test_parse_media_box_short_array() {
+        let editor = create_test_editor();
+        let media_box = Object::Array(vec![Object::Integer(0), Object::Integer(0)]);
+
+        let (w, h) = editor.parse_media_box(&media_box).unwrap();
+        // Should return default Letter size
+        assert_eq!(w, 612.0);
+        assert_eq!(h, 792.0);
+    }
+
+    // =========================================================================
+    // find_prev_xref_offset
+    // =========================================================================
+
+    #[test]
+    fn test_find_prev_xref_offset_valid() {
+        let editor = create_test_editor();
+
+        // The function searches backwards from pos = len - 100 down to 1.
+        // At each pos it checks if bytes[pos..] starts with "startxref".
+        // So "startxref" must be at a position p where 1 <= p <= len - 100.
+        // We put startxref at position 10, then pad after it to make total > 110.
+        let mut pdf_data = Vec::new();
+        pdf_data.extend_from_slice(b"%PDF-1.4\n"); // 9 bytes
+        pdf_data.extend_from_slice(b"startxref\n12345\n%%EOF\n"); // startxref at byte 9
+                                                                  // Pad to ensure len - 100 >= 9 (i.e., len >= 109)
+        while pdf_data.len() < 120 {
+            pdf_data.push(b'\n');
+        }
+        let result = editor.find_prev_xref_offset(&pdf_data);
+        assert_eq!(result.unwrap(), 12345);
+    }
+
+    #[test]
+    fn test_find_prev_xref_offset_with_whitespace() {
+        let editor = create_test_editor();
+
+        let mut pdf_data = Vec::new();
+        pdf_data.extend_from_slice(b"%PDF-1.4\n"); // 9 bytes
+        pdf_data.extend_from_slice(b"startxref\n  \r\n67890\n%%EOF\n"); // startxref at byte 9
+        while pdf_data.len() < 120 {
+            pdf_data.push(b'\n');
+        }
+        let result = editor.find_prev_xref_offset(&pdf_data);
+        assert_eq!(result.unwrap(), 67890);
+    }
+
+    #[test]
+    fn test_find_prev_xref_offset_not_found() {
+        let editor = create_test_editor();
+
+        // No "startxref" anywhere, and data is long enough
+        let mut pdf_data = vec![b'X'; 200];
+        pdf_data.extend_from_slice(b"\n%%EOF\n");
+        let result = editor.find_prev_xref_offset(&pdf_data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_find_prev_xref_offset_short_data() {
+        let editor = create_test_editor();
+
+        // Data shorter than 100 bytes -- pos starts at 0, loop doesn't execute
+        let pdf_data = b"startxref\n999\n%%EOF\n";
+        let result = editor.find_prev_xref_offset(pdf_data);
+        // Short data means pos starts at 0 and while pos > 0 is false, so it should err
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // allocate_object_id
+    // =========================================================================
+
+    #[test]
+    fn test_allocate_object_id_sequential() {
+        let mut editor = create_test_editor();
+        let first = editor.allocate_object_id();
+        let second = editor.allocate_object_id();
+        let third = editor.allocate_object_id();
+
+        assert_eq!(second, first + 1);
+        assert_eq!(third, first + 2);
+    }
+
+    // =========================================================================
+    // current_page_count and page manipulation
+    // =========================================================================
+
+    #[test]
+    fn test_current_page_count_initial() {
+        let editor = create_test_editor();
+        assert_eq!(editor.current_page_count(), 1);
+    }
+
+    #[test]
+    fn test_current_page_count_after_removal() {
+        let mut editor = create_test_editor();
+        // Mark page 0 as removed
+        editor.page_order[0] = -1;
+        assert_eq!(editor.current_page_count(), 0);
+    }
+
+    #[test]
+    fn test_current_page_count_mixed() {
+        let mut editor = create_test_editor();
+        // Simulate 3 pages: [0, 1, 2], then remove page at index 1
+        editor.page_order = vec![0, -1, 2];
+        assert_eq!(editor.current_page_count(), 2);
+    }
+
+    // =========================================================================
+    // is_modified
+    // =========================================================================
+
+    #[test]
+    fn test_is_modified_initial() {
+        let editor = create_test_editor();
+        assert!(!editor.is_modified());
+    }
+
+    // =========================================================================
+    // source_path
+    // =========================================================================
+
+    #[test]
+    fn test_source_path() {
+        let pdf_bytes = minimal_pdf_bytes();
+        let tmp = std::env::temp_dir().join("pdf_oxide_test_path.pdf");
+        std::fs::write(&tmp, &pdf_bytes).unwrap();
+        let editor = DocumentEditor::open(&tmp).unwrap();
+        assert!(editor.source_path().contains("pdf_oxide_test_path.pdf"));
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    // =========================================================================
+    // version
+    // =========================================================================
+
+    #[test]
+    fn test_version() {
+        let editor = create_test_editor();
+        let (major, minor) = editor.version();
+        assert_eq!(major, 1);
+        assert_eq!(minor, 4);
+    }
+
+    // =========================================================================
+    // build_info_object
+    // =========================================================================
+
+    #[test]
+    fn test_build_info_object_none() {
+        let editor = create_test_editor();
+        assert!(editor.build_info_object().is_none());
+    }
+
+    #[test]
+    fn test_build_info_object_some() {
+        let mut editor = create_test_editor();
+        editor.modified_info = Some(DocumentInfo::new().title("Test"));
+        let obj = editor.build_info_object();
+        assert!(obj.is_some());
+        let dict = obj.unwrap().as_dict().unwrap().clone();
+        assert!(dict.contains_key("Title"));
+    }
+
+    // =========================================================================
+    // RedactionData
+    // =========================================================================
+
+    #[test]
+    fn test_redaction_data_construction() {
+        let rd = RedactionData {
+            rect: [10.0, 20.0, 100.0, 200.0],
+            color: [1.0, 0.0, 0.0],
+        };
+        assert_eq!(rd.rect[0], 10.0);
+        assert_eq!(rd.color[0], 1.0);
+    }
+
+    // =========================================================================
+    // AnnotationAppearance
+    // =========================================================================
+
+    #[test]
+    fn test_annotation_appearance_construction() {
+        let ap = AnnotationAppearance {
+            content: b"q 1 0 0 1 0 0 cm Q".to_vec(),
+            bbox: [0.0, 0.0, 100.0, 50.0],
+            annot_rect: [10.0, 20.0, 110.0, 70.0],
+            matrix: Some([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+            resources: None,
+        };
+        assert_eq!(ap.bbox[2], 100.0);
+        assert_eq!(ap.annot_rect[0], 10.0);
+        assert!(ap.matrix.is_some());
+        assert!(ap.resources.is_none());
+    }
+
+    #[test]
+    fn test_annotation_appearance_no_matrix_no_resources() {
+        let ap = AnnotationAppearance {
+            content: vec![],
+            bbox: [0.0, 0.0, 0.0, 0.0],
+            annot_rect: [0.0, 0.0, 0.0, 0.0],
+            matrix: None,
+            resources: None,
+        };
+        assert!(ap.matrix.is_none());
+        assert!(ap.content.is_empty());
+    }
+
+    // =========================================================================
+    // ImageInfo
+    // =========================================================================
+
+    #[test]
+    fn test_image_info_construction() {
+        let info = ImageInfo {
+            name: "Im1".to_string(),
+            bounds: [10.0, 20.0, 100.0, 50.0],
+            matrix: [100.0, 0.0, 0.0, 50.0, 10.0, 20.0],
+        };
+        assert_eq!(info.name, "Im1");
+        assert_eq!(info.bounds[2], 100.0);
+    }
+
+    // =========================================================================
+    // ImageModification
+    // =========================================================================
+
+    #[test]
+    fn test_image_modification_construction() {
+        let m = ImageModification {
+            x: Some(10.0),
+            y: None,
+            width: Some(200.0),
+            height: None,
+        };
+        assert_eq!(m.x, Some(10.0));
+        assert_eq!(m.y, None);
+        assert_eq!(m.width, Some(200.0));
+        assert_eq!(m.height, None);
+    }
+
+    // =========================================================================
+    // PageInfo
+    // =========================================================================
+
+    #[test]
+    fn test_page_info_construction() {
+        let info = PageInfo {
+            index: 0,
+            width: 612.0,
+            height: 792.0,
+            rotation: 90,
+            object_ref: ObjectRef::new(5, 0),
+        };
+        assert_eq!(info.index, 0);
+        assert_eq!(info.width, 612.0);
+        assert_eq!(info.rotation, 90);
+        assert_eq!(info.object_ref.id, 5);
+    }
+
+    // =========================================================================
+    // Metadata setters (set_title, set_author, etc.)
+    // =========================================================================
+
+    #[test]
+    fn test_set_title_marks_modified() {
+        let mut editor = create_test_editor();
+        assert!(!editor.is_modified());
+        editor.set_title("New Title");
+        assert!(editor.is_modified());
+        assert_eq!(editor.modified_info.as_ref().unwrap().title, Some("New Title".to_string()));
+    }
+
+    #[test]
+    fn test_set_author_marks_modified() {
+        let mut editor = create_test_editor();
+        editor.set_author("New Author");
+        assert!(editor.is_modified());
+        assert_eq!(editor.modified_info.as_ref().unwrap().author, Some("New Author".to_string()));
+    }
+
+    #[test]
+    fn test_set_subject_marks_modified() {
+        let mut editor = create_test_editor();
+        editor.set_subject("New Subject");
+        assert!(editor.is_modified());
+        assert_eq!(editor.modified_info.as_ref().unwrap().subject, Some("New Subject".to_string()));
+    }
+
+    #[test]
+    fn test_set_keywords_marks_modified() {
+        let mut editor = create_test_editor();
+        editor.set_keywords("kw1, kw2");
+        assert!(editor.is_modified());
+        assert_eq!(editor.modified_info.as_ref().unwrap().keywords, Some("kw1, kw2".to_string()));
+    }
+
+    #[test]
+    fn test_set_multiple_metadata_fields() {
+        let mut editor = create_test_editor();
+        editor.set_title("T1");
+        editor.set_author("A1");
+        editor.set_subject("S1");
+        editor.set_keywords("K1");
+
+        let info = editor.modified_info.as_ref().unwrap();
+        assert_eq!(info.title, Some("T1".to_string()));
+        assert_eq!(info.author, Some("A1".to_string()));
+        assert_eq!(info.subject, Some("S1".to_string()));
+        assert_eq!(info.keywords, Some("K1".to_string()));
+    }
+
+    // =========================================================================
+    // Erase region API methods
+    // =========================================================================
+
+    #[test]
+    fn test_erase_region_valid() {
+        let mut editor = create_test_editor();
+        let result = editor.erase_region(0, [10.0, 20.0, 100.0, 200.0]);
+        assert!(result.is_ok());
+        assert!(editor.is_modified());
+        assert_eq!(editor.erase_regions.get(&0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_erase_region_out_of_range() {
+        let mut editor = create_test_editor();
+        let result = editor.erase_region(99, [10.0, 20.0, 100.0, 200.0]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_erase_regions_multiple() {
+        let mut editor = create_test_editor();
+        let rects = &[[10.0, 20.0, 100.0, 200.0], [200.0, 300.0, 400.0, 500.0]];
+        let result = editor.erase_regions(0, rects);
+        assert!(result.is_ok());
+        assert_eq!(editor.erase_regions.get(&0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_erase_regions_out_of_range() {
+        let mut editor = create_test_editor();
+        let result = editor.erase_regions(99, &[[10.0, 20.0, 100.0, 200.0]]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_clear_erase_regions() {
+        let mut editor = create_test_editor();
+        editor.erase_region(0, [10.0, 20.0, 100.0, 200.0]).unwrap();
+        assert!(editor.erase_regions.contains_key(&0));
+        editor.clear_erase_regions(0);
+        assert!(!editor.erase_regions.contains_key(&0));
+    }
+
+    // =========================================================================
+    // Annotation flatten methods
+    // =========================================================================
+
+    #[test]
+    fn test_flatten_page_annotations_valid() {
+        let mut editor = create_test_editor();
+        assert!(!editor.is_page_marked_for_flatten(0));
+        editor.flatten_page_annotations(0).unwrap();
+        assert!(editor.is_page_marked_for_flatten(0));
+        assert!(editor.is_modified());
+    }
+
+    #[test]
+    fn test_flatten_page_annotations_out_of_range() {
+        let mut editor = create_test_editor();
+        assert!(editor.flatten_page_annotations(99).is_err());
+    }
+
+    #[test]
+    fn test_flatten_all_annotations() {
+        let mut editor = create_test_editor();
+        editor.flatten_all_annotations().unwrap();
+        assert!(editor.is_page_marked_for_flatten(0));
+    }
+
+    #[test]
+    fn test_unmark_page_for_flatten() {
+        let mut editor = create_test_editor();
+        editor.flatten_page_annotations(0).unwrap();
+        assert!(editor.is_page_marked_for_flatten(0));
+        editor.unmark_page_for_flatten(0);
+        assert!(!editor.is_page_marked_for_flatten(0));
+    }
+
+    // =========================================================================
+    // Form flatten methods
+    // =========================================================================
+
+    #[test]
+    fn test_flatten_forms_on_page_valid() {
+        let mut editor = create_test_editor();
+        assert!(!editor.is_page_marked_for_form_flatten(0));
+        editor.flatten_forms_on_page(0).unwrap();
+        assert!(editor.is_page_marked_for_form_flatten(0));
+    }
+
+    #[test]
+    fn test_flatten_forms_on_page_out_of_range() {
+        let mut editor = create_test_editor();
+        assert!(editor.flatten_forms_on_page(99).is_err());
+    }
+
+    #[test]
+    fn test_flatten_forms() {
+        let mut editor = create_test_editor();
+        assert!(!editor.will_remove_acroform());
+        editor.flatten_forms().unwrap();
+        assert!(editor.is_page_marked_for_form_flatten(0));
+        assert!(editor.will_remove_acroform());
+    }
+
+    // =========================================================================
+    // Redaction methods
+    // =========================================================================
+
+    #[test]
+    fn test_apply_page_redactions_valid() {
+        let mut editor = create_test_editor();
+        assert!(!editor.is_page_marked_for_redaction(0));
+        editor.apply_page_redactions(0).unwrap();
+        assert!(editor.is_page_marked_for_redaction(0));
+        assert!(editor.is_modified());
+    }
+
+    #[test]
+    fn test_apply_page_redactions_out_of_range() {
+        let mut editor = create_test_editor();
+        assert!(editor.apply_page_redactions(99).is_err());
+    }
+
+    #[test]
+    fn test_apply_all_redactions() {
+        let mut editor = create_test_editor();
+        editor.apply_all_redactions().unwrap();
+        assert!(editor.is_page_marked_for_redaction(0));
+    }
+
+    #[test]
+    fn test_unmark_page_for_redaction() {
+        let mut editor = create_test_editor();
+        editor.apply_page_redactions(0).unwrap();
+        editor.unmark_page_for_redaction(0);
+        assert!(!editor.is_page_marked_for_redaction(0));
+    }
+
+    // =========================================================================
+    // Image modification methods
+    // =========================================================================
+
+    #[test]
+    fn test_reposition_image_valid() {
+        let mut editor = create_test_editor();
+        let result = editor.reposition_image(0, "Im1", 100.0, 200.0);
+        assert!(result.is_ok());
+        assert!(editor.is_modified());
+        assert!(editor.has_image_modifications(0));
+    }
+
+    #[test]
+    fn test_reposition_image_out_of_range() {
+        let mut editor = create_test_editor();
+        assert!(editor.reposition_image(99, "Im1", 100.0, 200.0).is_err());
+    }
+
+    #[test]
+    fn test_resize_image_valid() {
+        let mut editor = create_test_editor();
+        let result = editor.resize_image(0, "Im1", 300.0, 200.0);
+        assert!(result.is_ok());
+        assert!(editor.has_image_modifications(0));
+    }
+
+    #[test]
+    fn test_resize_image_out_of_range() {
+        let mut editor = create_test_editor();
+        assert!(editor.resize_image(99, "Im1", 300.0, 200.0).is_err());
+    }
+
+    #[test]
+    fn test_set_image_bounds_valid() {
+        let mut editor = create_test_editor();
+        let result = editor.set_image_bounds(0, "Im1", 10.0, 20.0, 300.0, 200.0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_set_image_bounds_out_of_range() {
+        let mut editor = create_test_editor();
+        assert!(editor
+            .set_image_bounds(99, "Im1", 10.0, 20.0, 300.0, 200.0)
+            .is_err());
+    }
+
+    #[test]
+    fn test_clear_image_modifications() {
+        let mut editor = create_test_editor();
+        editor.reposition_image(0, "Im1", 10.0, 20.0).unwrap();
+        assert!(editor.has_image_modifications(0));
+        editor.clear_image_modifications(0);
+        assert!(!editor.has_image_modifications(0));
+    }
+
+    #[test]
+    fn test_has_image_modifications_empty() {
+        let editor = create_test_editor();
+        assert!(!editor.has_image_modifications(0));
+        assert!(!editor.has_image_modifications(99));
+    }
+
+    // =========================================================================
+    // Embedded files
+    // =========================================================================
+
+    #[test]
+    fn test_embed_file() {
+        let mut editor = create_test_editor();
+        let result = editor.embed_file("test.txt", b"Hello World".to_vec());
+        assert!(result.is_ok());
+        assert!(editor.is_modified());
+        assert_eq!(editor.pending_embedded_files().len(), 1);
+    }
+
+    #[test]
+    fn test_embed_file_multiple() {
+        let mut editor = create_test_editor();
+        editor.embed_file("a.txt", b"AAA".to_vec()).unwrap();
+        editor.embed_file("b.txt", b"BBB".to_vec()).unwrap();
+        assert_eq!(editor.pending_embedded_files().len(), 2);
+    }
+
+    #[test]
+    fn test_clear_embedded_files() {
+        let mut editor = create_test_editor();
+        editor.embed_file("a.txt", b"AAA".to_vec()).unwrap();
+        assert_eq!(editor.pending_embedded_files().len(), 1);
+        editor.clear_embedded_files();
+        assert!(editor.pending_embedded_files().is_empty());
+    }
+
+    // =========================================================================
+    // set_page_rotation and rotate_page_by
+    // =========================================================================
+
+    #[test]
+    fn test_set_page_rotation_valid_values() {
+        let mut editor = create_test_editor();
+        for &deg in &[0, 90, 180, 270] {
+            assert!(editor.set_page_rotation(0, deg).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_set_page_rotation_invalid_values() {
+        let mut editor = create_test_editor();
+        assert!(editor.set_page_rotation(0, 45).is_err());
+        assert!(editor.set_page_rotation(0, 360).is_err());
+        assert!(editor.set_page_rotation(0, -90).is_err());
+    }
+
+    #[test]
+    fn test_set_page_rotation_out_of_range() {
+        let mut editor = create_test_editor();
+        assert!(editor.set_page_rotation(99, 90).is_err());
+    }
+
+    #[test]
+    fn test_set_page_media_box_valid() {
+        let mut editor = create_test_editor();
+        let result = editor.set_page_media_box(0, [0.0, 0.0, 500.0, 700.0]);
+        assert!(result.is_ok());
+        assert!(editor.is_modified());
+    }
+
+    #[test]
+    fn test_set_page_media_box_out_of_range() {
+        let mut editor = create_test_editor();
+        assert!(editor
+            .set_page_media_box(99, [0.0, 0.0, 500.0, 700.0])
+            .is_err());
+    }
+
+    #[test]
+    fn test_set_page_crop_box_valid() {
+        let mut editor = create_test_editor();
+        let result = editor.set_page_crop_box(0, [10.0, 10.0, 602.0, 782.0]);
+        assert!(result.is_ok());
+        assert!(editor.is_modified());
+    }
+
+    #[test]
+    fn test_set_page_crop_box_out_of_range() {
+        let mut editor = create_test_editor();
+        assert!(editor
+            .set_page_crop_box(99, [10.0, 10.0, 602.0, 782.0])
+            .is_err());
+    }
+
+    // =========================================================================
+    // EditableDocument trait: page_count, set_info, get_info
+    // =========================================================================
+
+    #[test]
+    fn test_editable_page_count() {
+        let mut editor = create_test_editor();
+        assert_eq!(EditableDocument::page_count(&mut editor).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_editable_set_info() {
+        let mut editor = create_test_editor();
+        let info = DocumentInfo::new().title("SetInfo Test");
+        EditableDocument::set_info(&mut editor, info).unwrap();
+        assert!(editor.is_modified());
+
+        let retrieved = EditableDocument::get_info(&mut editor).unwrap();
+        assert_eq!(retrieved.title, Some("SetInfo Test".to_string()));
+    }
+
+    #[test]
+    fn test_editable_get_info_returns_modified() {
+        let mut editor = create_test_editor();
+
+        // Set info via the trait
+        let info = DocumentInfo::new()
+            .title("Modified Title")
+            .author("Modified Author");
+        EditableDocument::set_info(&mut editor, info).unwrap();
+
+        // Get should return the modified version
+        let result = EditableDocument::get_info(&mut editor).unwrap();
+        assert_eq!(result.title, Some("Modified Title".to_string()));
+        assert_eq!(result.author, Some("Modified Author".to_string()));
+    }
+
+    // =========================================================================
+    // set_page_content - error path
+    // =========================================================================
+
+    #[test]
+    fn test_set_page_content_out_of_range() {
+        let mut editor = create_test_editor();
+        let content = StructureElement::default();
+        let result = editor.set_page_content(99, content);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_page_content_valid() {
+        let mut editor = create_test_editor();
+        let content = StructureElement {
+            structure_type: "Document".to_string(),
+            bbox: crate::geometry::Rect::new(0.0, 0.0, 612.0, 792.0),
+            children: Vec::new(),
+            reading_order: Some(0),
+            alt_text: None,
+            language: None,
+        };
+        let result = editor.set_page_content(0, content);
+        assert!(result.is_ok());
+        assert!(editor.is_modified());
+        assert!(editor.structure_modified);
+        assert!(editor.modified_content.contains_key(&0));
+    }
+
+    // =========================================================================
+    // Annotations query methods
+    // =========================================================================
+
+    #[test]
+    fn test_has_modified_annotations_false() {
+        let editor = create_test_editor();
+        assert!(!editor.has_modified_annotations(0));
+    }
+
+    #[test]
+    fn test_get_page_annotations_none() {
+        let editor = create_test_editor();
+        assert!(editor.get_page_annotations(0).is_none());
+    }
+
+    // =========================================================================
+    // rewrite_content_stream_with_image_mods
+    // =========================================================================
+
+    #[test]
+    fn test_rewrite_content_stream_no_mods() {
+        let editor = create_test_editor();
+        let content = b"q\n100 0 0 50 10 20 cm\n/Im1 Do\nQ\n";
+        let mods = HashMap::new(); // empty modifications
+        let result = editor
+            .rewrite_content_stream_with_image_mods(content, &mods)
+            .unwrap();
+        let s = String::from_utf8(result).unwrap();
+        // Should preserve the cm operator as-is
+        assert!(s.contains("cm\n"));
+        assert!(s.contains("/Im1 Do\n"));
+    }
+
+    #[test]
+    fn test_rewrite_content_stream_with_position_mod() {
+        let editor = create_test_editor();
+        let content = b"q\n100 0 0 50 10 20 cm\n/Im1 Do\nQ\n";
+        let mut mods = HashMap::new();
+        mods.insert(
+            "Im1".to_string(),
+            ImageModification {
+                x: Some(200.0),
+                y: Some(300.0),
+                width: None,
+                height: None,
+            },
+        );
+        let result = editor
+            .rewrite_content_stream_with_image_mods(content, &mods)
+            .unwrap();
+        let s = String::from_utf8(result).unwrap();
+        // The e and f values (position) should be modified
+        assert!(s.contains("200.0"));
+        assert!(s.contains("300.0"));
+    }
+
+    #[test]
+    fn test_rewrite_content_stream_with_size_mod() {
+        let editor = create_test_editor();
+        let content = b"q\n100 0 0 50 10 20 cm\n/Im1 Do\nQ\n";
+        let mut mods = HashMap::new();
+        mods.insert(
+            "Im1".to_string(),
+            ImageModification {
+                x: None,
+                y: None,
+                width: Some(400.0),
+                height: Some(300.0),
+            },
+        );
+        let result = editor
+            .rewrite_content_stream_with_image_mods(content, &mods)
+            .unwrap();
+        let s = String::from_utf8(result).unwrap();
+        // The a and d values (size) should be modified
+        assert!(s.contains("400.0"));
+        assert!(s.contains("300.0"));
+    }
+
+    // =========================================================================
+    // Open with non-existent file
+    // =========================================================================
+
+    #[test]
+    fn test_open_nonexistent_file() {
+        let result = DocumentEditor::open("/tmp/nonexistent_pdf_oxide_test.pdf");
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // EditableDocument trait: remove_page, move_page, duplicate_page
+    // =========================================================================
+
+    /// Helper that creates a test editor with N pages (using a multi-page minimal PDF).
+    fn create_multi_page_editor(n: usize) -> DocumentEditor {
+        // Build a minimal PDF with n pages
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+
+        // Object 1: Catalog
+        let catalog_offset = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+        // Build Kids array
+        let mut kids = String::from("[");
+        for i in 0..n {
+            if i > 0 {
+                kids.push(' ');
+            }
+            kids.push_str(&format!("{} 0 R", i + 3));
+        }
+        kids.push(']');
+
+        // Object 2: Pages
+        let pages_offset = pdf.len();
+        let pages_str =
+            format!("2 0 obj\n<< /Type /Pages /Kids {} /Count {} >>\nendobj\n", kids, n);
+        pdf.extend_from_slice(pages_str.as_bytes());
+
+        // Page objects
+        let mut page_offsets = Vec::new();
+        for i in 0..n {
+            page_offsets.push(pdf.len());
+            let page_str = format!(
+                "{} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n",
+                i + 3
+            );
+            pdf.extend_from_slice(page_str.as_bytes());
+        }
+
+        // xref
+        let xref_offset = pdf.len();
+        let total_objects = n + 3;
+        pdf.extend_from_slice(format!("xref\n0 {}\n", total_objects).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", catalog_offset).as_bytes());
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", pages_offset).as_bytes());
+        for offset in &page_offsets {
+            pdf.extend_from_slice(format!("{:010} 00000 n \n", offset).as_bytes());
+        }
+
+        // trailer
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+                total_objects, xref_offset
+            )
+            .as_bytes(),
+        );
+
+        let tmp = std::env::temp_dir().join(format!(
+            "pdf_oxide_multipage_test_{}.pdf",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&tmp, &pdf).unwrap();
+        let editor = DocumentEditor::open(&tmp).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+        editor
+    }
+
+    #[test]
+    fn test_remove_page_valid() {
+        let mut editor = create_multi_page_editor(3);
+        assert_eq!(editor.current_page_count(), 3);
+        editor.remove_page(1).unwrap();
+        assert_eq!(editor.current_page_count(), 2);
+        assert!(editor.is_modified());
+    }
+
+    #[test]
+    fn test_remove_page_out_of_range() {
+        let mut editor = create_multi_page_editor(2);
+        assert!(editor.remove_page(5).is_err());
+    }
+
+    #[test]
+    fn test_move_page_valid() {
+        let mut editor = create_multi_page_editor(3);
+        editor.move_page(0, 2).unwrap();
+        assert!(editor.is_modified());
+        // Page order should be rearranged
+        assert_eq!(editor.page_order, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn test_move_page_out_of_range() {
+        let mut editor = create_multi_page_editor(2);
+        assert!(editor.move_page(0, 5).is_err());
+        assert!(editor.move_page(5, 0).is_err());
+    }
+
+    #[test]
+    fn test_duplicate_page_valid() {
+        let mut editor = create_multi_page_editor(2);
+        let new_idx = editor.duplicate_page(0).unwrap();
+        assert_eq!(new_idx, 2); // Was 2 pages, new one is at index 2
+        assert_eq!(editor.current_page_count(), 3);
+        assert!(editor.is_modified());
+    }
+
+    #[test]
+    fn test_duplicate_page_out_of_range() {
+        let mut editor = create_multi_page_editor(2);
+        assert!(editor.duplicate_page(5).is_err());
+    }
+
+    // =========================================================================
+    // get_page_info
+    // =========================================================================
+
+    #[test]
+    fn test_get_page_info_valid() {
+        let mut editor = create_test_editor();
+        let info = editor.get_page_info(0).unwrap();
+        assert_eq!(info.index, 0);
+        assert_eq!(info.width, 612.0);
+        assert_eq!(info.height, 792.0);
+        assert_eq!(info.rotation, 0);
+    }
+
+    #[test]
+    fn test_get_page_info_out_of_range() {
+        let mut editor = create_test_editor();
+        assert!(editor.get_page_info(99).is_err());
+    }
+
+    // =========================================================================
+    // extract_pages error
+    // =========================================================================
+
+    #[test]
+    fn test_extract_pages_not_implemented() {
+        let mut editor = create_test_editor();
+        // Currently returns "not yet fully implemented"
+        let result = editor.extract_pages(&[0], "/tmp/output.pdf");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_pages_out_of_range() {
+        let mut editor = create_test_editor();
+        let result = editor.extract_pages(&[99], "/tmp/output.pdf");
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // rotate_page_by normalization
+    // =========================================================================
+
+    #[test]
+    fn test_rotate_page_by_normalization() {
+        let mut editor = create_test_editor();
+
+        // Start at 0, rotate by 90
+        editor.rotate_page_by(0, 90).unwrap();
+        assert_eq!(editor.get_page_rotation(0).unwrap(), 90);
+
+        // Rotate by another 90 -> 180
+        editor.rotate_page_by(0, 90).unwrap();
+        assert_eq!(editor.get_page_rotation(0).unwrap(), 180);
+
+        // Rotate by another 90 -> 270
+        editor.rotate_page_by(0, 90).unwrap();
+        assert_eq!(editor.get_page_rotation(0).unwrap(), 270);
+
+        // Rotate by another 90 -> 360 -> normalized to 0
+        editor.rotate_page_by(0, 90).unwrap();
+        assert_eq!(editor.get_page_rotation(0).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_rotate_all_pages() {
+        let mut editor = create_multi_page_editor(3);
+        editor.rotate_all_pages(90).unwrap();
+
+        for i in 0..3 {
+            assert_eq!(editor.get_page_rotation(i).unwrap(), 90);
+        }
+    }
+
+    // =========================================================================
+    // crop_margins
+    // =========================================================================
+
+    #[test]
+    fn test_crop_margins() {
+        let mut editor = create_test_editor();
+        editor.crop_margins(72.0, 72.0, 72.0, 72.0).unwrap();
+
+        // Should have set crop box for page 0
+        let props = editor.modified_page_props.get(&0).unwrap();
+        let crop = props.crop_box.unwrap();
+        assert!((crop[0] - 72.0).abs() < 0.01); // left margin
+        assert!((crop[1] - 72.0).abs() < 0.01); // bottom margin
+        assert!((crop[2] - 540.0).abs() < 0.01); // 612 - 72
+        assert!((crop[3] - 720.0).abs() < 0.01); // 792 - 72
+    }
+
+    // =========================================================================
+    // find_max_object_id
+    // =========================================================================
+
+    #[test]
+    fn test_find_max_object_id() {
+        let editor = create_test_editor();
+        // Our minimal PDF has /Size 4 in the trailer, so max_id should be 4
+        let max = DocumentEditor::find_max_object_id(&editor.source);
+        assert_eq!(max, 4);
+    }
+
+    // =========================================================================
+    // Operator: MoveTo, LineTo, Tm, TD
+    // =========================================================================
+
+    #[test]
+    fn test_serialize_operator_move_to() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::MoveTo { x: 10.0, y: 20.0 },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("m\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_line_to() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::LineTo { x: 100.0, y: 200.0 },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("l\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_tm() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::Tm {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e: 72.0,
+                f: 700.0,
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("Tm\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_big_td() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::TD { tx: 0.0, ty: -14.0 },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("TD\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_set_line_cap() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetLineCap { cap_style: 1 },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("J\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_set_line_join() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetLineJoin { join_style: 2 },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("j\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_set_miter_limit() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetMiterLimit { limit: 10.0 },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("M\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_set_flatness() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetFlatness { tolerance: 50.0 },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("i\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_set_stroke_cmyk() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetStrokeCmyk {
+                c: 0.0,
+                m: 1.0,
+                y: 0.5,
+                k: 0.0,
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("K\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_set_stroke_rgb() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetStrokeRgb {
+                r: 0.0,
+                g: 0.5,
+                b: 1.0,
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("RG\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_set_fill_gray() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::SetFillGray { gray: 0.75 },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.ends_with("g\n"));
+    }
+
+    #[test]
+    fn test_serialize_operator_begin_marked_content_dict() {
+        let editor = create_test_editor();
+        let mut output = Vec::new();
+        editor.serialize_operator(
+            &mut output,
+            &crate::content::operators::Operator::BeginMarkedContentDict {
+                tag: "Span".to_string(),
+                properties: Box::new(Object::Name("MC0".to_string())),
+            },
+        );
+        let s = String::from_utf8(output).unwrap();
+        assert!(s.contains("/Span"));
+        assert!(s.contains("/MC0"));
+        assert!(s.ends_with("BDC\n"));
     }
 }

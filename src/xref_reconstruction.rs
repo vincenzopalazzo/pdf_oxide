@@ -71,9 +71,18 @@ pub fn reconstruct_xref<R: Read + Seek>(reader: &mut R) -> Result<(CrossRefTable
     // Scan for "N G obj" patterns
     // Pattern: one or more digits, whitespace, one or more digits, whitespace, "obj"
     for capture in RE_OBJ_PATTERN.captures_iter(&contents) {
-        let full_match = capture.get(0).unwrap();
-        let obj_num_bytes = capture.get(1).unwrap().as_bytes();
-        let gen_num_bytes = capture.get(2).unwrap().as_bytes();
+        let full_match = match capture.get(0) {
+            Some(m) => m,
+            None => continue,
+        };
+        let obj_num_bytes = match capture.get(1) {
+            Some(m) => m.as_bytes(),
+            None => continue,
+        };
+        let gen_num_bytes = match capture.get(2) {
+            Some(m) => m.as_bytes(),
+            None => continue,
+        };
 
         // Parse object and generation numbers
         let obj_num: u32 = match std::str::from_utf8(obj_num_bytes)
@@ -270,7 +279,8 @@ fn reconstruct_minimal_trailer<R: Read + Seek>(
         return Err(Error::InvalidPdf("Could not find catalog in reconstructed xref".to_string()));
     }
 
-    let (cat_num, cat_gen) = catalog_ref.unwrap();
+    // Safety: catalog_ref.is_none() is checked above and returns Err
+    let (cat_num, cat_gen) = catalog_ref.expect("catalog_ref validated above");
 
     // Create minimal trailer dictionary
     let mut trailer_dict = HashMap::new();
@@ -389,7 +399,10 @@ pub fn search_nearby_for_object<R: Read + Seek>(
 
     // Look for "N G obj" marker
     let pattern = format!(r"{} \d+ obj", obj_id);
-    let re = regex::bytes::Regex::new(&pattern).unwrap();
+    let re = match regex::bytes::Regex::new(&pattern) {
+        Ok(r) => r,
+        Err(_) => return Err(Error::ObjectNotFound(obj_id, 0)),
+    };
 
     if let Some(mat) = re.find(buffer) {
         let obj_offset = start + mat.start() as u64;
