@@ -52,10 +52,6 @@ All notable changes to PDFOxide are documented here.
 
 - **Large document performance** (#132) — Parallel extraction + global font cache + SmallVec + image-only skip combine to bring 1000-page PDFs well under 1 second on multi-core hardware.
 
-### Previously Implemented (confirmed in v0.3.10)
-
-- **Graphics-heavy page optimization** (#131) — `scan_graphics_region()` BT/ET boundary scanning already implemented.
-- **memchr SIMD scanning** (#115) — Already in use with BYTE_CLASS lookup table.
 
 ## [0.3.9] - 2026-02-24
 > Performance: 20+ Micro-Optimizations — 40% Faster Text Extraction
