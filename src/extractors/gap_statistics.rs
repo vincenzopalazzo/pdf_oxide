@@ -435,7 +435,7 @@ pub fn calculate_statistics(mut gaps: Vec<f32>) -> Option<GapStatistics> {
     let std_dev = variance.sqrt();
 
     // Sort for percentile calculations
-    gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    gaps.sort_by(|a, b| crate::utils::safe_float_cmp(*a, *b));
 
     // Calculate percentiles using linear interpolation
     let p10 = percentile(&gaps, 0.10);
@@ -562,7 +562,7 @@ fn detect_word_boundary_threshold(spans: &[TextSpan]) -> Option<f32> {
     }
 
     // Sort gaps
-    gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    gaps.sort_by(|a, b| crate::utils::safe_float_cmp(*a, *b));
 
     // Compute 75th percentile using linear interpolation
     let p75 = percentile(&gaps, 0.75);

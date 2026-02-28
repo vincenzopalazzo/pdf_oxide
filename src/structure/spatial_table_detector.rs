@@ -287,7 +287,7 @@ fn detect_columns(spans: &[TextSpan], column_tolerance: f32) -> Vec<ColumnCluste
     }
 
     // Sort columns left-to-right
-    columns.sort_by(|a, b| a.x_center.partial_cmp(&b.x_center).unwrap());
+    columns.sort_by(|a, b| crate::utils::safe_float_cmp(a.x_center, b.x_center));
 
     columns
 }
@@ -338,7 +338,7 @@ fn detect_rows(spans: &[TextSpan], row_tolerance: f32) -> Vec<RowCluster> {
     }
 
     // Sort rows top-to-bottom (higher Y first in PDF coordinates)
-    rows.sort_by(|a, b| b.y_center.partial_cmp(&a.y_center).unwrap());
+    rows.sort_by(|a, b| crate::utils::safe_float_cmp(b.y_center, a.y_center));
 
     rows
 }
@@ -641,7 +641,7 @@ fn extract_cell_text(cell_span_indices: &[usize], spans: &[TextSpan]) -> String 
     }
 
     // Sort by Y descending (top-to-bottom in PDF coordinates: higher Y = higher on page)
-    span_entries.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    span_entries.sort_by(|a, b| crate::utils::safe_float_cmp(b.0, a.0));
 
     // Group spans into lines based on Y proximity (tolerance of 2.0 points)
     let line_tolerance = 2.0_f32;

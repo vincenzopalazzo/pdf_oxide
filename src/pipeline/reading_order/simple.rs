@@ -24,20 +24,11 @@ impl ReadingOrderStrategy for SimpleStrategy {
 
         // Sort by Y descending (top first), then X ascending (left first)
         spans_with_index.sort_by(|(_, a), (_, b)| {
-            let y_cmp = b
-                .bbox
-                .y
-                .partial_cmp(&a.bbox.y)
-                .unwrap_or(std::cmp::Ordering::Equal);
-
-            match y_cmp {
-                std::cmp::Ordering::Equal => a
-                    .bbox
-                    .x
-                    .partial_cmp(&b.bbox.x)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-                other => other,
+            let y_cmp = crate::utils::safe_float_cmp(b.bbox.y, a.bbox.y);
+            if y_cmp != std::cmp::Ordering::Equal {
+                return y_cmp;
             }
+            crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x)
         });
 
         Ok(spans_with_index

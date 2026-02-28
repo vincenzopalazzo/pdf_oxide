@@ -152,13 +152,12 @@ impl HtmlConverter {
             .collect();
 
         // Sort by Y position (top to bottom), then X position (left to right)
-        span_blocks.sort_by(|a, b| match a.bbox.y.partial_cmp(&b.bbox.y) {
-            Some(std::cmp::Ordering::Equal) | None => a
-                .bbox
-                .x
-                .partial_cmp(&b.bbox.x)
-                .unwrap_or(std::cmp::Ordering::Equal),
-            other => other.unwrap_or(std::cmp::Ordering::Equal),
+        span_blocks.sort_by(|a, b| {
+            let y_cmp = crate::utils::safe_float_cmp(a.bbox.y, b.bbox.y);
+            if y_cmp != std::cmp::Ordering::Equal {
+                return y_cmp;
+            }
+            crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x)
         });
 
         // Merge adjacent spans on the same line into paragraphs
@@ -532,13 +531,11 @@ impl HtmlConverter {
                     let block_a = &blocks[a];
                     let block_b = &blocks[b];
 
-                    match block_a.bbox.y.partial_cmp(&block_b.bbox.y) {
-                        Some(std::cmp::Ordering::Equal) => block_a
-                            .bbox
-                            .x
-                            .partial_cmp(&block_b.bbox.x)
-                            .unwrap_or(std::cmp::Ordering::Equal),
-                        other => other.unwrap_or(std::cmp::Ordering::Equal),
+                    let y_cmp = crate::utils::safe_float_cmp(block_a.bbox.y, block_b.bbox.y);
+                    if y_cmp != std::cmp::Ordering::Equal {
+                        y_cmp
+                    } else {
+                        crate::utils::safe_float_cmp(block_a.bbox.x, block_b.bbox.x)
                     }
                 });
             },

@@ -329,6 +329,47 @@ pub(crate) mod utils {
             assert_eq!(safe_float_cmp(f32::INFINITY, 1.0), Ordering::Greater);
             assert_eq!(safe_float_cmp(f32::NEG_INFINITY, f32::INFINITY), Ordering::Less);
         }
+
+        /// Verify that sort_by using safe_float_cmp never panics with NaN values.
+        /// This is a regression test for the "total order" panic that affected 42
+        /// PDFs across 5 test datasets (issue found in v0.3.11-pre).
+        #[test]
+        fn test_sort_with_nan_does_not_panic() {
+            let mut values = vec![3.0_f32, f32::NAN, 1.0, f32::NAN, 2.0, f32::NAN, 0.5];
+            values.sort_by(|a, b| safe_float_cmp(*a, *b));
+            // NaN values should sort to the end (NaN > all numbers)
+            assert!(values[0..4].iter().all(|v| !v.is_nan()));
+            assert!(values[4..].iter().all(|v| v.is_nan()));
+        }
+
+        /// Verify transitivity: if a < b and b < c then a < c.
+        /// The previous `partial_cmp().unwrap_or(Equal)` pattern violated this
+        /// when NaN was involved, causing Rust's sort to panic.
+        #[test]
+        fn test_safe_float_cmp_transitivity() {
+            let a = 1.0_f32;
+            let b = 2.0_f32;
+            let nan = f32::NAN;
+
+            // a < b
+            assert_eq!(safe_float_cmp(a, b), Ordering::Less);
+            // b < NaN
+            assert_eq!(safe_float_cmp(b, nan), Ordering::Less);
+            // Therefore a < NaN (transitivity)
+            assert_eq!(safe_float_cmp(a, nan), Ordering::Less);
+        }
+
+        /// Sort a large array with mixed NaN/normal values to stress-test.
+        #[test]
+        fn test_sort_stress_with_nan() {
+            let mut values: Vec<f32> = (0..100).map(|i| i as f32).collect();
+            // Insert NaN at various positions
+            for i in (0..100).step_by(7) {
+                values[i] = f32::NAN;
+            }
+            // Must not panic
+            values.sort_by(|a, b| safe_float_cmp(*a, *b));
+        }
     }
 }
 

@@ -443,7 +443,7 @@ pub fn compute_page_gap_stats(page_num: usize, spans: &[TextSpan]) -> PageGapSta
     // Compute median and percentiles from positive gaps
     let (median, p25, p75) = if !positive_gaps.is_empty() {
         let mut sorted = positive_gaps.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| crate::utils::safe_float_cmp(*a, *b));
         let len = sorted.len();
         let median = sorted[len / 2];
         let p25 = sorted[len / 4];

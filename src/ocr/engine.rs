@@ -131,9 +131,9 @@ impl OcrOutput {
             if (y_a - y_b).abs() < 10.0 {
                 let x_a = a.polygon[0][0];
                 let x_b = b.polygon[0][0];
-                x_a.partial_cmp(&x_b).unwrap_or(std::cmp::Ordering::Equal)
+                crate::utils::safe_float_cmp(x_a, x_b)
             } else {
-                y_a.partial_cmp(&y_b).unwrap_or(std::cmp::Ordering::Equal)
+                crate::utils::safe_float_cmp(y_a, y_b)
             }
         });
 
@@ -165,9 +165,9 @@ impl OcrOutput {
             if (y_a - y_b).abs() < 10.0 {
                 let x_a = a.polygon[0][0];
                 let x_b = b.polygon[0][0];
-                x_a.partial_cmp(&x_b).unwrap_or(std::cmp::Ordering::Equal)
+                crate::utils::safe_float_cmp(x_a, x_b)
             } else {
-                y_a.partial_cmp(&y_b).unwrap_or(std::cmp::Ordering::Equal)
+                crate::utils::safe_float_cmp(y_a, y_b)
             }
         });
 

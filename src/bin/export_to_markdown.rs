@@ -279,11 +279,7 @@ fn paths_to_markdown(paths: &[GraphicsPath], page_width: f32) -> String {
         .collect();
 
     // Sort by Y coordinate (top to bottom)
-    horizontal_lines.sort_by(|a, b| {
-        b.start_y
-            .partial_cmp(&a.start_y)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    horizontal_lines.sort_by(|a, b| b.start_y.total_cmp(&a.start_y));
 
     // Group lines that are close together (within 10 pixels)
     let mut last_y = f32::INFINITY;
@@ -704,10 +700,7 @@ fn group_chars_into_blocks(chars: &[TextChar]) -> Vec<TextBlock> {
             match a_x_rounded.cmp(&b_x_rounded) {
                 std::cmp::Ordering::Equal => {
                     // If X is equal, use original float comparison as tiebreaker
-                    a.bbox
-                        .x
-                        .partial_cmp(&b.bbox.x)
-                        .unwrap_or(std::cmp::Ordering::Equal)
+                    a.bbox.x.total_cmp(&b.bbox.x)
                 },
                 other => other,
             }

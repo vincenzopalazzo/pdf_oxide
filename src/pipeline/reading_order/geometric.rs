@@ -54,7 +54,7 @@ impl GeometricStrategy {
 
         // Collect all X coordinates (left edges)
         let mut x_coords: Vec<f32> = spans.iter().map(|s| s.bbox.x).collect();
-        x_coords.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        x_coords.sort_by(|a, b| crate::utils::safe_float_cmp(*a, *b));
         x_coords.dedup();
 
         if x_coords.len() < 2 {
@@ -87,7 +87,7 @@ impl GeometricStrategy {
 
         // Collect all X coordinates (left edges) - same as detect_columns
         let mut x_coords: Vec<f32> = spans.iter().map(|s| s.bbox.x).collect();
-        x_coords.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        x_coords.sort_by(|a, b| crate::utils::safe_float_cmp(*a, *b));
         x_coords.dedup();
 
         if x_coords.len() < 2 {
@@ -114,7 +114,7 @@ impl GeometricStrategy {
         }
 
         // Sort gaps to find percentiles
-        gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        gaps.sort_by(|a, b| crate::utils::safe_float_cmp(*a, *b));
 
         // Use the 25th percentile as "typical" word spacing
         // This is more robust than median for documents with varying layouts
@@ -179,11 +179,7 @@ impl ReadingOrderStrategy for GeometricStrategy {
             // Sort spans within column by Y (top to bottom, descending Y = top first)
             let mut column_sorted = column;
             column_sorted.sort_by(|&a, &b| {
-                spans[b]
-                    .bbox
-                    .y
-                    .partial_cmp(&spans[a].bbox.y)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                crate::utils::safe_float_cmp(spans[b].bbox.y, spans[a].bbox.y)
             });
 
             for idx in column_sorted {

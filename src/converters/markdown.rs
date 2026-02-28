@@ -286,13 +286,12 @@ impl MarkdownConverter {
             .collect();
 
         // Sort blocks by Y position (top to bottom), then X position (left to right)
-        blocks.sort_by(|a, b| match a.bbox.y.partial_cmp(&b.bbox.y) {
-            Some(std::cmp::Ordering::Equal) | None => a
-                .bbox
-                .x
-                .partial_cmp(&b.bbox.x)
-                .unwrap_or(std::cmp::Ordering::Equal),
-            other => other.unwrap_or(std::cmp::Ordering::Equal),
+        blocks.sort_by(|a, b| {
+            let y_cmp = crate::utils::safe_float_cmp(a.bbox.y, b.bbox.y);
+            if y_cmp != std::cmp::Ordering::Equal {
+                return y_cmp;
+            }
+            crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x)
         });
 
         // **Task B.1: Pre-Validation Bold Filter (BEFORE any grouping)**
@@ -646,16 +645,12 @@ impl MarkdownConverter {
         sorted_chars.sort_by(|a, b| {
             // Primary sort: Y coordinate (PDF coords: larger Y = higher on page)
             // For top-to-bottom reading, we want LARGER Y first
-            match b.bbox.y.partial_cmp(&a.bbox.y) {
-                Some(std::cmp::Ordering::Equal) | None => {
-                    // Secondary sort: X coordinate (left to right)
-                    a.bbox
-                        .x
-                        .partial_cmp(&b.bbox.x)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                },
-                other => other.unwrap_or(std::cmp::Ordering::Equal),
+            let y_cmp = crate::utils::safe_float_cmp(b.bbox.y, a.bbox.y);
+            if y_cmp != std::cmp::Ordering::Equal {
+                return y_cmp;
             }
+            // Secondary sort: X coordinate (left to right)
+            crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x)
         });
 
         // Compute font-adaptive epsilon for word clustering
@@ -782,16 +777,12 @@ impl MarkdownConverter {
                     // Primary sort: Y coordinate (larger Y = higher on page in PDF coords)
                     // PDF coordinates: origin at bottom-left, Y increases upward
                     // So top of page (large Y) comes before bottom (small Y)
-                    match block_b.bbox.y.partial_cmp(&block_a.bbox.y) {
-                        Some(std::cmp::Ordering::Equal) => {
-                            // Secondary sort: X coordinate (smaller X = further left)
-                            block_a
-                                .bbox
-                                .x
-                                .partial_cmp(&block_b.bbox.x)
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        },
-                        other => other.unwrap_or(std::cmp::Ordering::Equal),
+                    let y_cmp = crate::utils::safe_float_cmp(block_b.bbox.y, block_a.bbox.y);
+                    if y_cmp != std::cmp::Ordering::Equal {
+                        y_cmp
+                    } else {
+                        // Secondary sort: X coordinate (smaller X = further left)
+                        crate::utils::safe_float_cmp(block_a.bbox.x, block_b.bbox.x)
                     }
                 });
             },
@@ -859,16 +850,12 @@ impl MarkdownConverter {
                 let block_b = &blocks[b];
 
                 // Primary sort: Y coordinate (larger Y = higher on page in PDF coords)
-                match block_b.bbox.y.partial_cmp(&block_a.bbox.y) {
-                    Some(std::cmp::Ordering::Equal) => {
-                        // Secondary sort: X coordinate (smaller X = further left)
-                        block_a
-                            .bbox
-                            .x
-                            .partial_cmp(&block_b.bbox.x)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    },
-                    other => other.unwrap_or(std::cmp::Ordering::Equal),
+                let y_cmp = crate::utils::safe_float_cmp(block_b.bbox.y, block_a.bbox.y);
+                if y_cmp != std::cmp::Ordering::Equal {
+                    y_cmp
+                } else {
+                    // Secondary sort: X coordinate (smaller X = further left)
+                    crate::utils::safe_float_cmp(block_a.bbox.x, block_b.bbox.x)
                 }
             });
 

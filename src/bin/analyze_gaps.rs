@@ -172,7 +172,7 @@ fn analyze_pdf(pdf_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 .filter(|g| **g >= default_threshold)
                 .copied()
                 .collect();
-            above_gaps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            above_gaps.sort_by(|a, b| a.total_cmp(b));
             println!("  Gaps that WOULD create spaces:");
             println!(
                 "    Min: {:.4}pt, Max: {:.4}pt, Count: {}",
@@ -240,7 +240,7 @@ fn analyze_gaps(spans: &[pdf_oxide::layout::TextSpan]) {
         println!("    (sorted from smallest to largest)\n");
 
         let mut sorted_gaps = gap_details.clone();
-        sorted_gaps.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+        sorted_gaps.sort_by(|a, b| a.2.total_cmp(&b.2));
 
         for (i, (text1, text2, gap)) in sorted_gaps.iter().take(20).enumerate() {
             let text1_display = if text1.len() > 15 {

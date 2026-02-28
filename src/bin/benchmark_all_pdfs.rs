@@ -207,7 +207,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Show slowest PDFs
     let mut sorted_results = summary.results.clone();
-    sorted_results.sort_by(|a, b| b.duration_ms.partial_cmp(&a.duration_ms).unwrap());
+    sorted_results.sort_by(|a, b| b.duration_ms.total_cmp(&a.duration_ms));
 
     println!("{}", "=".repeat(80));
     println!("TOP 10 SLOWEST PDFs");

@@ -179,12 +179,8 @@ impl SmartLayoutAnalyzer {
             let block_b = &blocks[b];
 
             // Sort by Y position (top to bottom), then X position (left to right)
-            block_a
-                .bbox
-                .y
-                .partial_cmp(&block_b.bbox.y)
-                .unwrap()
-                .then(block_a.bbox.x.partial_cmp(&block_b.bbox.x).unwrap())
+            crate::utils::safe_float_cmp(block_a.bbox.y, block_b.bbox.y)
+                .then(crate::utils::safe_float_cmp(block_a.bbox.x, block_b.bbox.x))
         });
 
         order

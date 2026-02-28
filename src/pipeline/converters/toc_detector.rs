@@ -112,10 +112,7 @@ impl TocDetector {
         // Sort spans by Y-coordinate (descending, since PDF coords are top-down)
         let mut sorted = spans.iter().collect::<Vec<_>>();
         sorted.sort_by(|a, b| {
-            b.bbox
-                .bottom()
-                .partial_cmp(&a.bbox.bottom())
-                .unwrap_or(std::cmp::Ordering::Equal)
+            crate::utils::safe_float_cmp(b.bbox.bottom(), a.bbox.bottom())
         });
 
         // Group consecutive spans within vertical tolerance
@@ -130,10 +127,7 @@ impl TocDetector {
             } else {
                 // Sort line left-to-right
                 current_line.sort_by(|a, b| {
-                    a.bbox
-                        .left()
-                        .partial_cmp(&b.bbox.left())
-                        .unwrap_or(std::cmp::Ordering::Equal)
+                    crate::utils::safe_float_cmp(a.bbox.left(), b.bbox.left())
                 });
                 lines.push(current_line);
                 current_line = vec![span];
@@ -142,10 +136,7 @@ impl TocDetector {
 
         if !current_line.is_empty() {
             current_line.sort_by(|a, b| {
-                a.bbox
-                    .left()
-                    .partial_cmp(&b.bbox.left())
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                crate::utils::safe_float_cmp(a.bbox.left(), b.bbox.left())
             });
             lines.push(current_line);
         }

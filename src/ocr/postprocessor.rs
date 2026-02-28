@@ -86,11 +86,7 @@ pub fn extract_boxes(
     }
 
     // Sort by confidence (highest first)
-    boxes.sort_by(|a, b| {
-        b.confidence
-            .partial_cmp(&a.confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    boxes.sort_by(|a, b| crate::utils::safe_float_cmp(b.confidence, a.confidence));
 
     Ok(boxes)
 }

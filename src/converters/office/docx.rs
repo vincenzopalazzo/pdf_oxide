@@ -349,7 +349,7 @@ impl DocxConverter {
                 .runs
                 .iter()
                 .filter_map(|r| r.style.font_size)
-                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .max_by(|a, b| crate::utils::safe_float_cmp(*a, *b))
                 .unwrap_or(self.config.default_font_size);
 
             let line_height = if para.style.heading_level.is_some() {

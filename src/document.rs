@@ -2706,19 +2706,11 @@ impl PdfDocument {
 
         // Sort combined spans by position: Y descending (top→bottom), then X ascending (left→right)
         spans.sort_by(|a, b| {
-            let y_cmp = b
-                .bbox
-                .y
-                .partial_cmp(&a.bbox.y)
-                .unwrap_or(std::cmp::Ordering::Equal);
+            let y_cmp = crate::utils::safe_float_cmp(b.bbox.y, a.bbox.y);
             if y_cmp != std::cmp::Ordering::Equal {
                 return y_cmp;
             }
-            let x_cmp = a
-                .bbox
-                .x
-                .partial_cmp(&b.bbox.x)
-                .unwrap_or(std::cmp::Ordering::Equal);
+            let x_cmp = crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x);
             if x_cmp != std::cmp::Ordering::Equal {
                 return x_cmp;
             }
@@ -4461,18 +4453,11 @@ impl PdfDocument {
             );
             // Sort by Y descending (top→bottom), then X ascending (left→right)
             spans_without_mcid.sort_by(|a, b| {
-                let y_cmp = b
-                    .bbox
-                    .y
-                    .partial_cmp(&a.bbox.y)
-                    .unwrap_or(std::cmp::Ordering::Equal);
+                let y_cmp = crate::utils::safe_float_cmp(b.bbox.y, a.bbox.y);
                 if y_cmp != std::cmp::Ordering::Equal {
                     return y_cmp;
                 }
-                a.bbox
-                    .x
-                    .partial_cmp(&b.bbox.x)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                crate::utils::safe_float_cmp(a.bbox.x, b.bbox.x)
             });
             for span in &spans_without_mcid {
                 if let Some(prev) = prev_span {
@@ -7408,6 +7393,13 @@ fn validate_object_at_offset<R: Read + Seek>(
         Some(e) => e,
         None => return false,
     };
+    // Compressed objects live inside object streams — their "offset" is the
+    // stream object number, not a byte position.  We cannot validate them by
+    // seeking, but their presence in a correctly parsed xref stream is
+    // sufficient proof that the xref is valid.
+    if entry.entry_type == crate::xref::XRefEntryType::Compressed {
+        return true;
+    }
     if reader.seek(SeekFrom::Start(entry.offset)).is_err() {
         return false;
     }
@@ -11106,5 +11098,34 @@ mod tests {
                 .as_bytes(),
         );
         assert_eq!(PdfDocument::open_from_bytes(pdf).unwrap().page_count_u32(), 0);
+    }
+
+    /// Regression test: validate_object_at_offset must return true for
+    /// compressed (type 2) xref entries.  Previously, it treated the object
+    /// stream number as a byte offset, sought to a random location, and
+    /// returned false — triggering a full-file xref reconstruction that took
+    /// 35+ seconds on large PDFs.
+    #[test]
+    fn test_validate_compressed_xref_entry() {
+        use crate::xref::{CrossRefTable, XRefEntry, XRefEntryType};
+
+        let mut xref = CrossRefTable::new();
+        // Add a compressed entry: object 5 lives inside object stream 10, at index 3
+        xref.entries.insert(
+            5,
+            XRefEntry {
+                entry_type: XRefEntryType::Compressed,
+                offset: 10,     // object stream number, NOT a byte offset
+                generation: 3,  // index within the stream
+                in_use: true,
+            },
+        );
+
+        let data = b"%PDF-1.7\n%%EOF\n";
+        let mut cursor = Cursor::new(data.to_vec());
+        let obj_ref = ObjectRef { id: 5, gen: 0 };
+
+        // Must return true — compressed objects are valid by virtue of being in the xref
+        assert!(validate_object_at_offset(&mut cursor, &xref, obj_ref));
     }
 }

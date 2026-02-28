@@ -293,7 +293,7 @@ impl XYCutStrategy {
         valleys
             .into_iter()
             .map(|(start, end)| (start, end, (end - start) as f32))
-            .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| crate::utils::safe_float_cmp(a.2, b.2))
     }
 
     /// Sort spans in reading order (top-to-bottom, left-to-right).
@@ -302,21 +302,12 @@ impl XYCutStrategy {
 
         sorted.sort_by(|a, b| {
             // Sort by Y (top) first, descending (top of page first)
-            match b
-                .bbox
-                .top()
-                .partial_cmp(&a.bbox.top())
-                .unwrap_or(std::cmp::Ordering::Equal)
-            {
-                std::cmp::Ordering::Equal => {
-                    // Same Y level, sort by X (left) ascending
-                    a.bbox
-                        .left()
-                        .partial_cmp(&b.bbox.left())
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                },
-                other => other,
+            let y_cmp = crate::utils::safe_float_cmp(b.bbox.top(), a.bbox.top());
+            if y_cmp != std::cmp::Ordering::Equal {
+                return y_cmp;
             }
+            // Same Y level, sort by X (left) ascending
+            crate::utils::safe_float_cmp(a.bbox.left(), b.bbox.left())
         });
 
         sorted

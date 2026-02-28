@@ -207,7 +207,7 @@ impl LinearGradientBuilder {
     fn build_function(&self) -> (Object, Option<Object>) {
         // Sort stops by position
         let mut stops = self.stops.clone();
-        stops.sort_by(|a, b| a.position.partial_cmp(&b.position).unwrap());
+        stops.sort_by(|a, b| crate::utils::safe_float_cmp(a.position, b.position));
 
         // If no stops, use black to white
         if stops.is_empty() {

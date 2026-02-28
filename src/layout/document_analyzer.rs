@@ -148,7 +148,7 @@ impl DocumentProperties {
     /// Compute median font size from characters.
     fn compute_median_font_size(chars: &[TextChar]) -> f32 {
         let mut font_sizes: Vec<f32> = chars.iter().map(|c| c.font_size).collect();
-        font_sizes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        font_sizes.sort_by(|a, b| crate::utils::safe_float_cmp(*a, *b));
 
         if font_sizes.is_empty() {
             return 12.0; // Default fallback
@@ -160,7 +160,7 @@ impl DocumentProperties {
     /// Compute median character width from characters.
     fn compute_median_char_width(chars: &[TextChar]) -> f32 {
         let mut widths: Vec<f32> = chars.iter().map(|c| c.bbox.width).collect();
-        widths.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        widths.sort_by(|a, b| crate::utils::safe_float_cmp(*a, *b));
 
         if widths.is_empty() {
             return 6.0; // Default fallback
@@ -190,7 +190,7 @@ impl DocumentProperties {
 
         // Extract line Y-coordinates (center of each bin)
         let mut line_ys: Vec<f32> = y_bins.keys().map(|&k| k as f32 * 5.0).collect();
-        line_ys.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)); // Top to bottom
+        line_ys.sort_by(|a, b| crate::utils::safe_float_cmp(*b, *a)); // Top to bottom
 
         // Compute line spacing (gaps between consecutive lines)
         let mut spacings = Vec::new();
@@ -205,7 +205,7 @@ impl DocumentProperties {
         let median_line_spacing = if spacings.is_empty() {
             12.0
         } else {
-            spacings.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            spacings.sort_by(|a, b| crate::utils::safe_float_cmp(*a, *b));
             spacings[spacings.len() / 2]
         };
 
