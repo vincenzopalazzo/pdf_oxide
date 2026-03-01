@@ -118,7 +118,10 @@ models/*.pt
 models/*.pth
 models/*.h5
 models/*.pb
-.models/                    # OCR model files
+# OCR model files
+.models/
+# ONNX Runtime cache
+.ort/
 .models/**/*.onnx
 .models/**/*.tar
 .models/**/inference.*
@@ -245,6 +248,14 @@ examples/verify_text.rs
 examples/xobject_investigation.rs
 examples/test_issue*.rs
 examples/test_irs_*.rs
+examples/diagnose_*.rs
+examples/trace_slow.rs
+examples/verify_corpus.rs
+examples/diagnose_slow_images.rs
+examples/analyze_tables.rs
+examples/inspect_char_codes.rs
+examples/test_spacing_fix.rs
+examples/test_pdf.rs
 
 # Root-level temporary PDFs (local dev artifacts)
 /*.pdf
